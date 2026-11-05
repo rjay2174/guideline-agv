@@ -10,8 +10,8 @@ struct DynamicStation {
   char keyUID[24];
 };
 
-constexpr const char* AGV_FW_BUILD = "2026-11-05.2-ir-start-rfid-github";
-constexpr const char* AGV_UI_BUILD = "2026-11-05-ir-start-rfid-github";
+constexpr const char* AGV_FW_BUILD = "2026-11-05.3-ble-wifi-fallback";
+constexpr const char* AGV_UI_BUILD = "2026-11-05-ble-wifi-fallback";
 
 enum RunState : uint8_t {
   IDLE,
