@@ -1,6 +1,7 @@
 #pragma once
 #include <WiFi.h>
 #include <WebServer.h>
+#include <WebSocketsServer.h> // Links2004 WebSockets library
 #include <DNSServer.h>
 #include <LittleFS.h>
 #include <Preferences.h>
@@ -34,6 +35,10 @@ extern uint32_t getAllIRBlackElapsedMs();
 class AGVComm {
 private:
   WebServer server{80};
+  WebSocketsServer wsServer{81};  // Same AP + router interfaces, separate TCP port.
+  int wsOwner = -1;              // One active joystick client at a time.
+  bool wsArmed = false;
+  uint32_t wsLastMotionMs = 0;
   DNSServer dnsServer;
   bool fsMounted = false;
   bool indexReady = false;
@@ -48,6 +53,78 @@ private:
   uint32_t lastAPCheckMs = 0;
   uint32_t lastRouterStatusMs = 0;
   uint8_t routerAttempts = 0;
+
+  // Only A (fresh finger press) can arm this connection. WebSocket reconnection
+  // by itself must never restart a stopped wheel. S releases immediately.
+  void handleWebSocket(uint8_t client, WStype_t type, uint8_t* data, size_t size) {
+    if (type == WStype_CONNECTED) {
+      Serial.printf("[WS] Client %u connected on port 81; manual control disarmed\n", unsigned(client));
+      wsServer.sendTXT(client, "READY");
+      return;
+    }
+    if (type == WStype_DISCONNECTED) {
+      if (wsOwner == int(client)) {
+        if (state == MANUAL) { motors.stop(); state = IDLE; }
+        wsOwner = -1;
+        wsArmed = false;
+        Serial.println("[WS] Active joystick disconnected; motors stopped");
+      }
+      return;
+    }
+    if (type == WStype_TEXT && size == 1) {
+      if (data[0] == 'S') {
+        if (wsOwner == int(client)) {
+          motors.stop();
+          if (state == MANUAL) state = IDLE;
+          wsOwner = -1;
+          wsArmed = false;
+          wsServer.sendTXT(client, "STOPPED");
+        }
+        return;
+      }
+      if (data[0] == 'A') {
+        if (wsOwner >= 0 && wsOwner != int(client)) {
+          wsServer.sendTXT(client, "BUSY");
+          return;
+        }
+        if (isMotionBlocked() || (state != IDLE && state != MANUAL)) {
+          wsServer.sendTXT(client, "BLOCKED");
+          return;
+        }
+        wsOwner = int(client);
+        wsArmed = true;
+        wsLastMotionMs = millis();
+        wsServer.sendTXT(client, "ARMED");
+        return;
+      }
+    }
+    // Binary frame: signed int8 throttle (0..100), signed int8 turn (-100..100).
+    if (type != WStype_BIN || size != 2 || wsOwner != int(client) || !wsArmed) return;
+    const int throttle = int(int8_t(data[0]));
+    const int turn = int(int8_t(data[1]));
+    if (throttle < 0 || throttle > 100 || turn < -100 || turn > 100) return;
+    if (isMotionBlocked() || (state != IDLE && state != MANUAL)) {
+      if (state == MANUAL) { motors.stop(); state = IDLE; }
+      wsArmed = false;
+      wsOwner = -1;
+      wsServer.sendTXT(client, "BLOCKED");
+      return;
+    }
+    wsLastMotionMs = millis();
+    lastManualCommandTime = wsLastMotionMs;
+    const float y = float(throttle) / 100.0f;
+    const float x = float(turn) / 100.0f;
+    const int p = motors.maxSpeed;
+    const int l = lroundf(p * y * (x < 0.0f ? 1.0f + x : 1.0f));
+    const int r = lroundf(p * y * (x > 0.0f ? 1.0f - x : 1.0f));
+    if (l == 0 && r == 0) {
+      motors.stop();
+      if (state == MANUAL) state = IDLE;
+    } else {
+      state = MANUAL;
+      motors.drive(l, r); // Enforces ultrasonic, all-IR and diagnostic interlocks.
+    }
+  }
 
   static const char* wifiStatusText(wl_status_t st) {
     switch(st) {
@@ -511,6 +588,12 @@ public:
 
     server.begin();
     Serial.println("[HTTP] Web server started on port 80.");
+    wsServer.begin();
+    wsServer.onEvent([this](uint8_t n, WStype_t t, uint8_t* p, size_t len) {
+      handleWebSocket(n,t,p,len);
+    });
+    wsServer.enableHeartbeat(10000,3000,2);
+    Serial.println("[WS] Low-latency joystick on TCP 81 (AP 192.168.4.1 + router IP)");
   }
 
   void update() {
@@ -546,6 +629,18 @@ public:
         WiFi.softAPConfig(IPAddress(192,168,4,1),IPAddress(192,168,4,1),IPAddress(255,255,255,0));
         startAccessPoint();
       }
+    }
+    // Service the latency-critical joystick before the HTTP page/status requests.
+    wsServer.loop();
+    // Lost packets must NOT leave the AGV running, or resume on a late frame.
+    if (wsOwner >= 0 && wsArmed &&
+        uint32_t(millis()-wsLastMotionMs) > WS_RC_TIMEOUT_MS) {
+      const int expiredClient = wsOwner;
+      if (state == MANUAL) { motors.stop(); state = IDLE; }
+      wsOwner = -1;
+      wsArmed = false; // Must receive a new A after joystick release.
+      wsServer.sendTXT(uint8_t(expiredClient), "TIMEOUT");
+      Serial.println("[WS] Joystick watchdog timeout; stopped and disarmed");
     }
     dnsServer.processNextRequest();
     server.handleClient();
