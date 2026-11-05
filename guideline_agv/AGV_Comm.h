@@ -517,11 +517,17 @@ public:
         (isAllIRBlackSafetyLatched() ? "All-black fault latched: clear sensors then START" : "Start blocked by safety or operating state")));
     });
     server.on("/reset", HTTP_POST, [this]() {
+      // A Web reset disarms any active WebSocket controller so a held finger
+      // cannot immediately send another motor command.
+      if(wsOwner>=0) wsServer.sendTXT(uint8_t(wsOwner), "STOPPED");
+      wsOwner=-1; wsArmed=false;
       requestSafeStop();
       server.send(200, "text/plain", isAllIRBlackSafetyLatched() ?
         "RESET: all-black fault remains while IR=11111" : "RESET: Ready for START");
     });
     server.on("/stop", HTTP_POST, [this]() {
+      if(wsOwner>=0) wsServer.sendTXT(uint8_t(wsOwner), "STOPPED");
+      wsOwner=-1; wsArmed=false;
       requestSafeStop();
       server.send(200, "text/plain", "OK");
     });
