@@ -14,6 +14,10 @@ on:
         default: 'v2026.11.05-websocket-remote'
         type: string
 
+concurrency:
+  group: agv-build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
 permissions:
   contents: write
 
@@ -26,7 +30,16 @@ jobs:
       - name: Install ESP32 board platform and MFRC522 library
         run: |
           arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
-          arduino-cli core install esp32:esp32@3.3.2 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          installed=false
+          for attempt in 1 2 3; do
+            if arduino-cli core install esp32:esp32@3.3.2 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json; then
+              installed=true
+              break
+            fi
+            echo "ESP32 download failed (attempt $attempt/3); retrying after delay"
+            sleep $((attempt * 10))
+          done
+          if [ "$installed" != true ]; then exit 1; fi
           arduino-cli lib install MFRC522
           arduino-cli lib install WebSockets
       - name: Compile ESP32-S3 with OTA + LittleFS partition
