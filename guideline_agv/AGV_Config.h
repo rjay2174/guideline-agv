@@ -10,8 +10,8 @@ struct DynamicStation {
   char keyUID[24];
 };
 
-constexpr const char* AGV_FW_BUILD = "2026-11-05.3-ble-wifi-fallback";
-constexpr const char* AGV_UI_BUILD = "2026-11-05-ble-wifi-fallback";
+constexpr const char* AGV_FW_BUILD = "2026-11-05.4-websocket-remote";
+constexpr const char* AGV_UI_BUILD = "2026-11-05-websocket-remote";
 
 enum RunState : uint8_t {
   IDLE,
@@ -38,7 +38,10 @@ const char* DEFAULT_STA_PASS = ""; // Public GitHub build: requires saved NVS ro
 const char* DEVICE_HOSTNAME  = "guideline-agv";
 
 constexpr uint32_t PWM_FREQ_HZ   = 1000;
-constexpr uint32_t RC_TIMEOUT_MS = 1200;
+constexpr uint32_t RC_TIMEOUT_MS = 1200; // HTTP/BLE/manual fallback watchdog
+// WebSocket frames arrive every 40ms. Missed control data for 450ms stops wheels
+// AND disarms the connection; another fresh joystick press is required.
+constexpr uint32_t WS_RC_TIMEOUT_MS = 450;
 constexpr uint32_t LOOP_GUARD_MS = 350; // Retained for compatibility
 // 2 seconds bridging straight, followed by up to 5 seconds active search.
 constexpr uint32_t STRAIGHT_BRIDGE_MIN_MS = 2000;
