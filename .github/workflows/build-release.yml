@@ -1,6 +1,11 @@
 name: Build and publish GUIDELine AGV firmware
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'guideline_agv/**'
+      - '.github/workflows/build-release.yml'
   workflow_dispatch:
     inputs:
       release_tag:
@@ -31,6 +36,7 @@ jobs:
           cp build/guideline_agv.ino.bin firmware.bin
           sha256sum firmware.bin > firmware.bin.sha256
       - name: Publish firmware.bin as latest GitHub Release
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.release_tag }}
