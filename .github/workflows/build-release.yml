@@ -1,0 +1,43 @@
+name: Build and publish GUIDELine AGV firmware
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Unique tag for tested firmware
+        required: true
+        default: v2026.11.05-irguard-rfid
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Install ESP32 platform and MFRC522
+        run: |
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@3.3.2 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli lib install MFRC522
+      - name: Compile application binary
+        run: |
+          arduino-cli compile --fqbn esp32:esp32:esp32s3:PartitionScheme=min_spiffs guideline_agv --output-dir build
+          test -s build/guideline_agv.ino.bin
+          cp build/guideline_agv.ino.bin firmware.bin
+          sha256sum firmware.bin > firmware.bin.sha256
+      - name: Publish latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists. Choose a new tag."; exit 1
+          fi
+          gh release create "$TAG" firmware.bin firmware.bin.sha256 \
+            --title "GUIDELine AGV $TAG" \
+            --notes "ESP32-S3 firmware; stop and test safety before operation" \
+            --latest
