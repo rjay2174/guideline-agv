@@ -4,7 +4,7 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-05-ir-start-rfid-github">
+  <meta name="agv-ui-version" content="2026-11-05-ble-wifi-fallback">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -69,9 +69,9 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
     <h3>Manual Control</h3>
     <div class="row" style="margin-bottom:12px">
       <button id="bleConnectBtn" style="background:#8957e5">Connect Web Bluetooth</button>
-      <span id="bleStatus" style="color:#8b9eb7;font-weight:600">BLE: Disconnected</span>
+      <span id="bleStatus" style="color:#8b9eb7;font-weight:600">Wi-Fi joystick available</span>
     </div>
-    <p style="color:#8b9eb7">Obstacle protection remains active in manual control.</p>
+    <p style="color:#8b9eb7">The joystick uses Wi-Fi by default. Bluetooth is optional and requires a supported secure browser. Obstacle protection remains active in manual control.</p>
     <div id="pad">FORWARD &uarr;<br>&larr; TURN &rarr;<div id="knob"></div></div>
     <p id="joyValue" style="text-align:center;color:#8b9eb7">Neutral (Released)</p>
   </div></section>
@@ -210,7 +210,28 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
   const BLE_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
   const BLE_CHAR_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
+  const webBluetoothSupported = Boolean(
+    window.isSecureContext && navigator.bluetooth &&
+    typeof navigator.bluetooth.requestDevice === 'function'
+  );
+  function showRemoteAvailability(){
+    if (!webBluetoothSupported){
+      $('bleConnectBtn').disabled = true;
+      $('bleConnectBtn').textContent = 'Web Bluetooth unavailable';
+      $('bleConnectBtn').title = 'Captive portal / HTTP pages cannot access Web Bluetooth. Use Wi-Fi joystick below.';
+      $('bleStatus').textContent = 'Wi-Fi joystick ready. Web Bluetooth unavailable in this browser or HTTP portal.';
+      $('bleStatus').style.color = '#79b8ff';
+    } else {
+      $('bleStatus').textContent = 'Wi-Fi joystick ready; Bluetooth optional.';
+    }
+  }
+  showRemoteAvailability();
+
   async function connectBLE(){
+    if (!webBluetoothSupported) {
+      showRemoteAvailability();
+      return;
+    }
     try{
       $('bleStatus').textContent='Scanning for AGV Bluetooth...';
       bleDevice = await navigator.bluetooth.requestDevice({
@@ -233,13 +254,19 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
   }
 
   function clearHold(){
+    const wasDriving = hold !== null;
     hold=null;
     if(timer!==null) clearInterval(timer);
     timer=null;
     $('joyValue').textContent='Neutral (Released)';
     $('knob').style.left='calc(50% - 22px)';
     $('knob').style.top='calc(100% - 50px)';
-    if(bleChar){ const buf = new Int8Array([0, 0]); bleChar.writeValueWithoutResponse(buf); }
+    if(bleChar){
+      const buf = new Int8Array([0, 0]);
+      bleChar.writeValueWithoutResponse(buf).catch(()=>{});
+    }
+    // Immediately stop Wi-Fi remote mode on pointer release.
+    if(wasDriving) fetch('/stop',{method:'POST',cache:'no-store',keepalive:true}).catch(()=>{});
   }
 
   async function stopAll(){ clearHold(); await act('/stop'); }
