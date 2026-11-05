@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-05-ble-wifi-fallback">
+  <meta name="agv-ui-version" content="2026-11-05-websocket-remote">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -69,7 +69,8 @@
       <button id="bleConnectBtn" style="background:#8957e5">Connect Web Bluetooth</button>
       <span id="bleStatus" style="color:#8b9eb7;font-weight:600">Wi-Fi joystick available</span>
     </div>
-    <p style="color:#8b9eb7">The joystick uses Wi-Fi by default. Bluetooth is optional and requires a supported secure browser. Obstacle protection remains active in manual control.</p>
+    <p id="wsStatus" style="color:#79b8ff;font-weight:600" role="status">Connecting WebSocket joystick...</p>
+    <p style="color:#8b9eb7">The joystick uses low-latency WebSocket via AGV Wi-Fi or your router, with automatic HTTP fallback. Bluetooth is optional. Obstacle and IR safety stops remain active.</p>
     <div id="pad">FORWARD &uarr;<br>&larr; TURN &rarr;<div id="knob"></div></div>
     <p id="joyValue" style="text-align:center;color:#8b9eb7">Neutral (Released)</p>
   </div></section>
@@ -205,6 +206,53 @@
   const $=id=>document.getElementById(id);
   let latest=null, hold=null, timer=null, driveBusy=false, refreshBusy=false;
   let bleDevice=null, bleServer=null, bleChar=null;
+  let joystickSocket=null, wsRetry=null, wsTimeout=null;
+  let joystickArmed=false;
+  const WS_URL=(location.protocol==='https:'?'wss://':'ws://')+location.hostname+':81/';
+  function wsReady(){ return joystickSocket && joystickSocket.readyState===WebSocket.OPEN; }
+  function wsFeedback(label,color='#79b8ff') {
+    $('wsStatus').textContent=label;
+    $('wsStatus').style.color=color;
+  }
+  function connectJoystickSocket(){
+    if(!('WebSocket' in window)){
+      wsFeedback('WebSocket unavailable: HTTP joystick fallback');return;
+    }
+    if(joystickSocket && (joystickSocket.readyState===WebSocket.CONNECTING || wsReady()))return;
+    if(wsTimeout)clearTimeout(wsTimeout);
+    wsFeedback('Connecting WebSocket at '+location.hostname+':81 ...');
+    const socket=new WebSocket(WS_URL);
+    socket.binaryType='arraybuffer';
+    joystickSocket=socket;
+    wsTimeout=setTimeout(()=>{if(socket.readyState===WebSocket.CONNECTING)socket.close();},2500);
+    socket.onopen=()=>{
+      if(joystickSocket!==socket)return;
+      if(wsTimeout)clearTimeout(wsTimeout);
+      // If HTTP was moving during connection, require a new finger press.
+      if(hold!==null)clearHold();
+      joystickArmed=false;
+      wsFeedback('WebSocket connected | direct AP or router | low-latency','#2ea043');
+    };
+    socket.onmessage=e=>{
+      if(joystickSocket!==socket)return;
+      const code=String(e.data);
+      if(code==='TIMEOUT'||code==='BLOCKED'||code==='BUSY'){
+        clearHold();
+        wsFeedback('WebSocket: '+code+' — release and press joystick again','#f1c40f');
+      }
+    };
+    socket.onerror=()=>{if(joystickSocket===socket)wsFeedback('HTTP fallback (WebSocket not reachable)','#f1c40f');};
+    socket.onclose=()=>{
+      if(joystickSocket!==socket)return;
+      if(wsTimeout)clearTimeout(wsTimeout);
+      if(hold!==null)clearHold();
+      joystickArmed=false;
+      wsFeedback('HTTP fallback | reconnecting WebSocket...', '#f1c40f');
+      if(wsRetry)clearTimeout(wsRetry);
+      wsRetry=setTimeout(connectJoystickSocket,2000);
+    };
+  }
+  connectJoystickSocket();
   const BLE_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
   const BLE_CHAR_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
 
@@ -254,6 +302,7 @@
   function clearHold(){
     const wasDriving = hold !== null;
     hold=null;
+    joystickArmed=false;
     if(timer!==null) clearInterval(timer);
     timer=null;
     $('joyValue').textContent='Neutral (Released)';
@@ -263,25 +312,37 @@
       const buf = new Int8Array([0, 0]);
       bleChar.writeValueWithoutResponse(buf).catch(()=>{});
     }
-    // Immediately stop Wi-Fi remote mode on pointer release.
-    if(wasDriving) fetch('/stop',{method:'POST',cache:'no-store',keepalive:true}).catch(()=>{});
+    if(wsReady()){
+      try{joystickSocket.send('S')}catch(e){}
+    }else if(wasDriving){
+      fetch('/stop',{method:'POST',cache:'no-store',keepalive:true}).catch(()=>{});
+    }
   }
 
   async function stopAll(){ clearHold(); await act('/stop'); }
 
   function pulse(){
-    if(!hold || driveBusy) return;
-    driveBusy=true;
+    if(!hold)return;
     const h=hold;
-    const throttleByte = Math.round(h.y * 100);
-    const turnByte = Math.round(h.x * 100);
-
+    const throttleByte=Math.round(h.y*100);
+    const turnByte=Math.round(h.x*100);
     if(bleChar){
-      const buf = new Int8Array([throttleByte, turnByte]);
-      bleChar.writeValueWithoutResponse(buf).finally(()=>{ driveBusy=false; });
-    } else {
-      let q=new URLSearchParams({turn:h.x.toFixed(3), throttle:h.y.toFixed(3)});
-      fetch('/drive?'+q, {method:'POST', cache:'no-store'}).finally(()=>{ driveBusy=false; });
+      if(driveBusy)return;
+      driveBusy=true;
+      const buf=new Int8Array([throttleByte,turnByte]);
+      bleChar.writeValueWithoutResponse(buf).catch(()=>{}).finally(()=>{driveBusy=false;});
+    } else if(wsReady()){
+      // No HTTP round-trip or driveBusy lock. Two bytes every 40ms.
+      if(!joystickArmed)return;
+      if(joystickSocket.bufferedAmount > 128)return; // Drop stale commands.
+      try{joystickSocket.send(new Int8Array([throttleByte,turnByte]));}
+      catch(e){clearHold();}
+    }else{
+      // Fallback to existing HTTP controls when TCP/81 is unavailable.
+      if(driveBusy)return;
+      driveBusy=true;
+      const q=new URLSearchParams({turn:h.x.toFixed(3),throttle:h.y.toFixed(3)});
+      fetch('/drive?'+q,{method:'POST',cache:'no-store'}).catch(()=>{}).finally(()=>{driveBusy=false;});
     }
   }
 
@@ -290,7 +351,11 @@
     e.preventDefault();
     e.currentTarget.setPointerCapture(e.pointerId);
     hold={dir, x:0, y:0, pointer:e.pointerId};
-    timer=setInterval(pulse, 40);
+    if(!bleChar && wsReady()){
+      joystickArmed=true;
+      try{joystickSocket.send('A');}catch(err){joystickArmed=false;}
+    }
+    timer=setInterval(pulse,40);
     return true;
   }
 
@@ -306,7 +371,10 @@
 
   $('pad').addEventListener('pointerdown',e=>{ if(begin('joystick',e)){ moveJoy(e); pulse(); } });
   $('pad').addEventListener('pointermove',moveJoy);
-  for(const n of ['pointerup','pointercancel','lostpointercapture']) $('pad').addEventListener(n, clearHold);
+  for(const n of ['pointerup','pointercancel','lostpointercapture']) $('pad').addEventListener(n,clearHold);
+  window.addEventListener('blur',clearHold);
+  window.addEventListener('pagehide',clearHold);
+  document.addEventListener('visibilitychange',()=>{if(document.hidden)clearHold();});
 
   $('globalStop').onclick=stopAll;
   for(const b of document.querySelectorAll('[data-stop]')) b.onclick=stopAll;
