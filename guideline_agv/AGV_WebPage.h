@@ -238,7 +238,7 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
     socket.onmessage=e=>{
       if(joystickSocket!==socket)return;
       const code=String(e.data);
-      if(code==='TIMEOUT'||code==='BLOCKED'||code==='BUSY'){
+      if(code==='TIMEOUT'||code==='BLOCKED'||code==='BUSY'||code==='STOPPED'){
         clearHold();
         wsFeedback('WebSocket: '+code+' — release and press joystick again','#f1c40f');
       }
