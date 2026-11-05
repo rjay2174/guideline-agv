@@ -1,0 +1,622 @@
+#pragma once
+#include <Arduino.h>
+static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="agv-ui-version" content="2026-11-05-ir-start-rfid-github">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>GUIDELine AGV Terminal</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif}*{box-sizing:border-box}
+    body{margin:0;background:#0d1520;color:#f0f4f8}header,main{max-width:960px;margin:auto;padding:16px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:22px;margin:0;font-weight:700}
+    button,select,input{font:inherit}button{background:#1f6feb;border:0;color:white;border-radius:10px;padding:12px 18px;min-height:44px;font-weight:600;cursor:pointer}
+    button:disabled{opacity:.4;cursor:default}.stop{background:#da3633;font-weight:700}.card{padding:18px;margin:12px 0;background:#162130;border:1px solid #28394e;border-radius:14px}
+    nav{display:flex;gap:8px;overflow:auto;padding-bottom:8px}nav button{white-space:nowrap;background:#202e42}nav button.active{background:#238636}
+    .menu{display:none}.menu.active{display:block}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.stat-box{background:#1b2a3e;padding:14px;border-radius:10px;border:1px solid #334862}
+    .stat-title{font-size:12px;text-transform:uppercase;color:#8b9eb7;letter-spacing:0.5px;margin-bottom:4px}
+    .stat-val{font-size:18px;font-weight:700;color:#58a6ff}
+    .ir{display:flex;gap:8px;margin:14px 0}.sensor{flex:1;text-align:center;background:#24364c;padding:12px 0;border-radius:8px;font-weight:600}.sensor.on{background:#2ea043;color:white}
+    label{display:block;margin:12px 0;font-weight:600}input[type=range]{width:100%;accent-color:#2ea043}input[type=text],input[type=number],input[type=password],select{padding:10px;background:#202e42;color:white;border:1px solid #3d5473;border-radius:8px;width:100%}
+    #pad{width:min(100%,330px);height:260px;border:2px solid #388bfd;background:radial-gradient(circle at 50% 100%, #1c324e, #101c2b);border-radius:18px;position:relative;touch-action:none;user-select:none;margin:16px auto;text-align:center;padding:16px;font-weight:700}
+    #knob{position:absolute;width:44px;height:44px;background:#58a6ff;border:3px solid #ffffff;border-radius:50%;left:calc(50% - 22px);top:calc(100% - 50px);pointer-events:none}
+    .check-row{display:flex;align-items:center;gap:10px;background:#1c2d42;padding:12px;border-radius:10px;border:1px solid #324c6e;margin:12px 0}
+    .check-row input[type=checkbox]{width:22px;height:22px;accent-color:#2ea043;cursor:pointer}
+  </style>
+</head>
+<body>
+<header>
+  <div><h1>GUIDELine <span style="color:#2ea043">AGV</span></h1><span style="color:#8b9eb7">Smart Autonomous Follower</span></div>
+  <button class="stop" id="globalStop">STOP</button>
+</header>
+<main>
+  <div class="card">
+    <div class="row" style="justify-content:space-between;margin-bottom:14px">
+      <div><div class="stat-title">Operating State</div><strong id="state" style="font-size:20px;color:#3fb950">Starting…</strong></div>
+      <div style="text-align:right"><div class="stat-title">Station</div><b id="station" style="font-size:18px;color:#58a6ff">—</b></div>
+    </div>
+    <div class="grid">
+      <div class="stat-box"><div class="stat-title">Obstacle Distance</div><div id="uiDistance" class="stat-val">Checking…</div></div>
+      <div class="stat-box"><div class="stat-title">Track Status</div><div id="uiLine" class="stat-val">Searching…</div></div>
+      <div class="stat-box"><div class="stat-title">Motor Speed</div><div id="uiSpeed" class="stat-val">0%</div></div>
+    </div>
+    <div class="stat-title" style="margin-top:16px">Ground IR Track Array</div>
+    <div id="ir" class="ir"></div>
+    <div id="irRawInfo" style="font-size:13px;color:#9db0c7">IR raw: —</div>
+    <div id="irAllBlackSafety" role="status" style="margin-top:8px;padding:10px;border-radius:8px;background:#202e42;color:#b9cde2;font-size:14px">All-five-IR safety: monitoring</div>
+    <div style="margin-top:8px;color:#8b9eb7;font-size:14px">Status: <span id="event" style="color:#f0f4f8">Ready</span></div>
+  </div>
+
+  <nav id="nav">
+    <button data-menu="auto" class="active">Automatic</button>
+    <button data-menu="joy">Remote Pad (BLE/Wi-Fi)</button>
+    <button data-menu="settings">Steering & Safety</button>
+    <button data-menu="color">Color Calibration</button>
+    <button data-menu="floor">Floor Calibration</button>
+    <button data-menu="wifi">Wi-Fi & Cloud OTA</button>
+    <button data-menu="stations">Stations & RFID</button>
+    <button data-menu="loadtest">Load Test</button>
+  </nav>
+
+  <section id="auto" class="menu active"><div class="card">
+    <h3>Autonomous Navigation</h3>
+    <div class="row"><button id="start" style="padding:16px 24px;font-size:16px">START / CONTINUE</button><button id="reset" style="background:#555">RESET</button><button class="stop" data-stop>STOP</button></div>
+  </div></section>
+
+  <section id="joy" class="menu"><div class="card">
+    <h3>Manual Control</h3>
+    <div class="row" style="margin-bottom:12px">
+      <button id="bleConnectBtn" style="background:#8957e5">Connect Web Bluetooth</button>
+      <span id="bleStatus" style="color:#8b9eb7;font-weight:600">BLE: Disconnected</span>
+    </div>
+    <p style="color:#8b9eb7">Obstacle protection remains active in manual control.</p>
+    <div id="pad">FORWARD &uarr;<br>&larr; TURN &rarr;<div id="knob"></div></div>
+    <p id="joyValue" style="text-align:center;color:#8b9eb7">Neutral (Released)</p>
+  </div></section>
+
+  <section id="settings" class="menu"><div class="card">
+    <h3>IR Line Sensor Diagnostics</h3>
+    <p style="color:#9db0c7">With the AGV stopped, place the five sensors over a black guide line one at a time. Select the polarity that lights the correct sensor only when it sees black. The setting is saved to NVS.</p>
+    <label>Sensor black-line output
+      <select id="irPolarity"><option value="1">LOW = BLACK (default)</option><option value="0">HIGH = BLACK</option></select>
+    </label>
+    <button id="saveIRPolarity">Save IR Polarity</button> <span id="irPolarityMsg" style="color:#9db0c7"></span>
+    <h3>Safety Settings</h3>
+    <label>Obstacle Stop Distance (cm): <input id="safetyDist" type="number" min="5" max="80" value="20"></label>
+    <button id="saveSafety">Save Safety Distance</button>
+  </div></section>
+
+  <section id="color" class="menu"><div class="card">
+    <h3>TCS3200 Color Calibration</h3>
+    <p style="color:#9db0c7">Calibrate the same floor colors separately in indoor lighting and outdoor daylight. Stop the AGV and hold the sensor at its normal mounting height. Shield it from direct sun when practical.</p>
+    <div class="grid">
+      <div class="stat-box"><div class="stat-title">Red / Hz</div><div class="stat-val" id="colR">—</div></div>
+      <div class="stat-box"><div class="stat-title">Green / Hz</div><div class="stat-val" id="colG">—</div></div>
+      <div class="stat-box"><div class="stat-title">Blue / Hz</div><div class="stat-val" id="colB">—</div></div>
+      <div class="stat-box"><div class="stat-title">Clear / Hz</div><div class="stat-val" id="colC">—</div></div>
+    </div>
+    <p id="colMatch" style="color:#9db0c7">Waiting for TCS3200 data…</p>
+    <h4>Capture a marker reference</h4>
+    <label>Lighting at calibration location
+      <select id="captureProfile"><option value="0">Indoor</option><option value="1">Outdoor (sunlight)</option></select>
+    </label>
+    <label>Marker color
+      <select id="captureColor"><option value="0">GREEN (start/finish)</option><option value="1">RED (station)</option><option value="2">BLUE</option><option value="3">YELLOW</option><option value="4">FLOOR (background)</option></select>
+    </label>
+    <button id="captureColorBtn">Capture & Save Reference</button>
+    <div id="profileProgress" style="margin-top:10px;color:#9db0c7">Indoor: —; Outdoor: —</div>
+    <h4>Recognition thresholds</h4>
+    <p style="color:#9db0c7">The threshold is maximum normalized RGB distance (0.025–0.300). Lower values reject more uncertain colors. Start with the defaults and adjust using the live match distance.</p>
+    <label>Active recognition profile
+      <select id="colorMode"><option value="2">Automatic (indoor + outdoor)</option><option value="0">Indoor only</option><option value="1">Outdoor only</option></select>
+    </label>
+    <label>Indoor tolerance <input id="indoorTolerance" type="number" min="0.025" max="0.300" step="0.005" value="0.085"></label>
+    <label>Outdoor tolerance <input id="outdoorTolerance" type="number" min="0.025" max="0.300" step="0.005" value="0.115"></label>
+    <div class="row"><button id="saveColorSettings">Save Settings to ESP32</button><button id="resetColorCal" style="background:#604c36">Clear Saved Calibration</button></div>
+    <p id="colorNotice" style="color:#58a6ff">Choose a color and press Capture while stationary.</p>
+  </div></section>
+
+  <section id="floor" class="menu"><div class="card">
+    <h3>Floor Color Calibration</h3>
+    <p style="color:#9db0c7">Place the TCS3200 over bare floor (away from station markers and guide tape), at its normal installed height. Stop the AGV before capturing. Save separate floor references for indoor lighting and outdoor daylight.</p>
+    <label>Floor lighting profile
+      <select id="floorProfile"><option value="0">Indoor lighting</option><option value="1">Outdoor daylight</option></select>
+    </label>
+    <button id="floorCaptureBtn" style="background:#238636">Capture & Save Floor Reference</button>
+    <div class="grid" style="margin-top:12px">
+      <div class="stat-box"><div class="stat-title">Indoor floor reference</div><strong id="floorIndoorStatus">Checking...</strong></div>
+      <div class="stat-box"><div class="stat-title">Outdoor floor reference</div><strong id="floorOutdoorStatus">Checking...</strong></div>
+    </div>
+    <p id="floorNotice" style="color:#58a6ff" role="status">Floor calibration status will appear here.</p>
+    <h4>Guide-line IR polarity</h4>
+    <p style="color:#9db0c7">The floor color reference helps the color sensor reject the background. The 5-channel IR array still needs a visible reflectance difference between guide line and floor. Set its polarity under Steering & Safety.</p>
+    <button id="floorGoIR" style="background:#3a4c63">Open IR Calibration</button>
+  </div></section>
+
+  <section id="wifi" class="menu"><div class="card">
+    <h3>Network & Updates</h3>
+    <div class="grid" style="margin:12px 0">
+      <div class="stat-box"><div class="stat-title">Router connection</div><strong id="routerLink">Checking...</strong></div>
+      <div class="stat-box"><div class="stat-title">Router SSID</div><strong id="routerSsid">—</strong></div>
+      <div class="stat-box"><div class="stat-title">Router IP</div><strong id="routerIp">—</strong></div>
+      <div class="stat-box"><div class="stat-title">Signal strength</div><strong id="routerRssi">—</strong></div>
+      <div class="stat-box"><div class="stat-title">AGV Access Point</div><strong id="apStatus">—</strong></div>
+      <div class="stat-box"><div class="stat-title">Local hostname</div><strong id="routerHost">—</strong></div>
+    </div>
+    <button id="wifiRefresh" style="background:#3a4c63">Refresh Wi-Fi Status</button>
+    <p id="wifiNotice" style="color:#9db0c7">Connection status is read from the ESP32.</p>
+    <label>Connect to Router SSID: <input id="staSsid" type="text"></label>
+    <label>Router Password: <input id="staPass" type="password"></label>
+    <button id="saveStaWifi">Connect Router</button>
+    <hr style="border:0;border-top:1px solid #28394e;margin:18px 0">
+    <h3>Cloud Firmware Update (GitHub)</h3>
+    <button id="btnGithubOta" style="background:#238636">Check & Install GitHub Update</button>
+    <p id="otaStatus" style="color:#58a6ff;margin-top:10px"></p>
+  </div></section>
+
+  <section id="stations" class="menu"><div class="card">
+    <h3>Station Colors & Automatic Continuation</h3>
+    <p>Configure 3 sequential workstations. A color may repeat across stations. GREEN is the default start/finish color. All settings persist in ESP32 NVS.</p>
+    <div id="stationRows"></div>
+    <label class="check-row"><input type="checkbox" id="autoStation">Automatically continue after each station timer (OFF = RFID or Web only)</label>
+    <button id="saveAutoStation">Save Auto-Continue</button>
+    <p id="stationCountdown">No station waiting</p>
+  </div><div class="card">
+    <h3>RFID Multi-Station Registration</h3>
+    <p>One key can serve several stations, and each station can accept several keys. The Master Card already has universal authorization; it does not need saving as a regular key. All motion is blocked while IR=11111.</p>
+    <div class="row">
+      <button id="rfidStartScan">Start RFID Scan (30s)</button>
+      <button id="rfidReinit">Reinitialize RC522</button>
+      <button id="rfidReadLatest">Read Last Scanned Card</button>
+    </div>
+    <p id="rfidLatest">Tap a key while stopped</p>
+    <pre id="rfidHealth" style="white-space:pre-wrap;color:#9db0c7">Reader diagnostics: not loaded</pre>
+    <label>Card UID <input id="rfidAssignUID" type="text" placeholder="AA BB CC DD"></label>
+    <div id="keyPermissions" class="row">
+      <label><input type="checkbox" data-slot="0"> Start</label>
+      <label><input type="checkbox" data-slot="1"> Station 1</label>
+      <label><input type="checkbox" data-slot="2"> Station 2</label>
+      <label><input type="checkbox" data-slot="3"> Station 3</label>
+    </div>
+    <button id="rfidSaveKey">Save RFID Permissions</button>
+    <p id="rfidMapNotice"></p><pre id="rfidSavedKeys"></pre>
+    <p>To replace the Master Card, scan the current Master first, enter the replacement UID, then use the button below.</p>
+    <button id="rfidReplaceMaster">Replace Master UID</button>
+  </div></section>
+
+  <section id="loadtest" class="menu"><div class="card" id="loadTestReport">
+    <h3>Straight-Line Load Test</h3>
+    <p>Start at GREEN or any guide-line position. Drive along the line; the obstacle at the endpoint stops the test. This mode does not automatically resume. Keep the route straight and repeat the obstacle placement and distance threshold for every trial.</p>
+    <div class="grid">
+      <label>Test number<input id="testNumber" type="number" min="1" max="9999" value="1"></label>
+      <label>Payload (kg)<input id="testLoad" type="number" min="0" max="20" step="0.01" value="0"></label>
+      <label>Speed (%)<input id="testSpeed" type="number" min="1" max="100" value="50"></label>
+    </div>
+    <div class="row"><button id="testStart">START TEST</button><button id="testStop" class="stop">STOP TEST</button><button id="testRecord">Record Result</button></div>
+    <p id="testLive">No test running</p><p id="testNotice"></p>
+    <h4>Test Log</h4>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse" id="testTable"><thead><tr><th>Test</th><th>Load kg</th><th>Speed %</th><th>Start</th><th>Stop</th><th>Duration s</th><th>Result</th></tr></thead><tbody id="testRows"></tbody></table></div>
+    <div class="row"><button id="testSavePng">Save Results PNG</button><button id="testCsv">Export CSV</button><button id="testClear">Clear Browser Log</button></div>
+    <small>PNG is a generated image of the test report and table. Trials are stored in this browser's local storage; the ESP32 retains only the latest test. Load values are user-entered, not measured by the AGV.</small>
+  </div></section>
+</main>
+
+<script>
+  const $=id=>document.getElementById(id);
+  let latest=null, hold=null, timer=null, driveBusy=false, refreshBusy=false;
+  let bleDevice=null, bleServer=null, bleChar=null;
+  const BLE_SERVICE_UUID = "4fafc201-1fb5-459e-8fcc-c5c9c331914b";
+  const BLE_CHAR_UUID    = "beb5483e-36e1-4688-b7f5-ea07361b26a8";
+
+  async function connectBLE(){
+    try{
+      $('bleStatus').textContent='Scanning for AGV Bluetooth...';
+      bleDevice = await navigator.bluetooth.requestDevice({
+        filters: [{ name: 'GUIDELine-AGV' }],
+        optionalServices: [BLE_SERVICE_UUID]
+      });
+      bleServer = await bleDevice.gatt.connect();
+      const service = await bleServer.getPrimaryService(BLE_SERVICE_UUID);
+      bleChar = await service.getCharacteristic(BLE_CHAR_UUID);
+      $('bleStatus').textContent='BLE: Connected (Ultra-Fast 10ms)';
+      $('bleStatus').style.color='#2ea043';
+    }catch(e){
+      $('bleStatus').textContent='BLE Error: '+e.message;
+    }
+  }
+  $('bleConnectBtn').onclick=connectBLE;
+
+  async function act(url){
+    try{ const r=await fetch(url,{method:'POST',cache:'no-store'}); return r.ok; }catch(e){ return false; }
+  }
+
+  function clearHold(){
+    hold=null;
+    if(timer!==null) clearInterval(timer);
+    timer=null;
+    $('joyValue').textContent='Neutral (Released)';
+    $('knob').style.left='calc(50% - 22px)';
+    $('knob').style.top='calc(100% - 50px)';
+    if(bleChar){ const buf = new Int8Array([0, 0]); bleChar.writeValueWithoutResponse(buf); }
+  }
+
+  async function stopAll(){ clearHold(); await act('/stop'); }
+
+  function pulse(){
+    if(!hold || driveBusy) return;
+    driveBusy=true;
+    const h=hold;
+    const throttleByte = Math.round(h.y * 100);
+    const turnByte = Math.round(h.x * 100);
+
+    if(bleChar){
+      const buf = new Int8Array([throttleByte, turnByte]);
+      bleChar.writeValueWithoutResponse(buf).finally(()=>{ driveBusy=false; });
+    } else {
+      let q=new URLSearchParams({turn:h.x.toFixed(3), throttle:h.y.toFixed(3)});
+      fetch('/drive?'+q, {method:'POST', cache:'no-store'}).finally(()=>{ driveBusy=false; });
+    }
+  }
+
+  function begin(dir,e){
+    if(hold) return false;
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    hold={dir, x:0, y:0, pointer:e.pointerId};
+    timer=setInterval(pulse, 40);
+    return true;
+  }
+
+  function moveJoy(e){
+    if(!hold || e.pointerId!==hold.pointer) return;
+    const r=$('pad').getBoundingClientRect();
+    let x=Math.max(-1,Math.min(1,2*(e.clientX-r.left)/r.width-1)), y=Math.max(0,Math.min(1,1-(e.clientY-r.top)/r.height));
+    hold.x=Math.abs(x)<.08?0:x; hold.y=y<.05?0:y;
+    $('knob').style.left='calc('+((hold.x+1)*50)+'% - 22px)';
+    $('knob').style.top='calc('+((1-hold.y)*100)+'% - 22px)';
+    $('joyValue').textContent='Throttle '+Math.round(hold.y*100)+'% | '+(hold.x>0?'Right ':'Left ')+Math.abs(hold.x).toFixed(2);
+  }
+
+  $('pad').addEventListener('pointerdown',e=>{ if(begin('joystick',e)){ moveJoy(e); pulse(); } });
+  $('pad').addEventListener('pointermove',moveJoy);
+  for(const n of ['pointerup','pointercancel','lostpointercapture']) $('pad').addEventListener(n, clearHold);
+
+  $('globalStop').onclick=stopAll;
+  for(const b of document.querySelectorAll('[data-stop]')) b.onclick=stopAll;
+
+  for(const b of document.querySelectorAll('[data-menu]')) b.onclick=async()=>{
+    clearHold();
+    if(b.dataset.menu==='joy'){ await act('/mode?mode=manual'); }
+    else if(b.dataset.menu==='auto'){ await act('/mode?mode=auto'); }
+    for(const el of document.querySelectorAll('.menu')) el.classList.toggle('active', el.id===b.dataset.menu);
+    for(const n of document.querySelectorAll('[data-menu]')) n.classList.toggle('active', n===b);
+  };
+
+  $('start').onclick=async()=>{
+    try {
+      const r=await fetch('/start',{method:'POST',cache:'no-store'});
+      const message=await r.text();
+      if(!r.ok){$('irAllBlackSafety').textContent=message;alert(message);}
+      else $('irAllBlackSafety').textContent='START accepted; navigation running';
+    }catch(e){alert('START communication failed: '+e.message)}
+  };
+  $('reset').onclick=()=>act('/reset');
+  $('saveSafety').onclick=()=>act('/safety?dist='+$('safetyDist').value);
+  $('saveStaWifi').onclick=()=>act('/wifi/sta?ssid='+encodeURIComponent($('staSsid').value)+'&pass='+encodeURIComponent($('staPass').value));
+
+  $('btnGithubOta').onclick=async()=>{
+    if(confirm("Download latest firmware from GitHub? The vehicle will lock its motors and reboot.")){
+      $('otaStatus').textContent="Downloading and flashing from GitHub... Please wait.";
+      try {
+        const response=await fetch('/ota/github',{method:'POST',cache:'no-store'});
+        $('otaStatus').textContent=await response.text();
+      } catch(e) { $('otaStatus').textContent='Connection lost during update: check router and Serial Monitor. '+e.message; }
+    }
+  };
+
+  async function refresh(){
+    if(refreshBusy || hold!==null) return;
+    refreshBusy=true;
+    try{
+      const r=await fetch('/status',{cache:'no-store'});
+      const d=await r.json();
+      $('state').textContent=d.state;
+      $('station').textContent=d.station;
+      $('uiDistance').textContent=d.distCm>0?d.distCm+' cm':'Clear';
+      $('uiSpeed').textContent=d.speed+'%';
+      $('event').textContent=d.event;
+      const safety=$('irAllBlackSafety');
+      if(d.irAllBlackLatched){
+        safety.textContent='SAFETY STOP: All 5 IR sensors read BLACK for 3 seconds. Clear the sensor pattern, then tap Master RFID or use START/RESET.';
+        safety.style.background='#602022';safety.style.color='#ffffff';
+      }else if(d.irAllBlackElapsedMs>0){
+        const remaining=Math.max(0,((d.irAllBlackStopMs-d.irAllBlackElapsedMs)/1000));
+        safety.textContent='ALL FIVE IR BLACK (11111): Safety stop in '+remaining.toFixed(1)+' s if unchanged while driving.';
+        safety.style.background='#584018';safety.style.color='#fff4d8';
+      }else{
+        safety.textContent=d.irAllBlack?'START INHIBITED: IR=11111. Master RFID, Web START and timed departure cannot move the AGV. Driving fault latches after 3 s continuous 11111.':'All-five-IR safety: normal (3 s continuous 11111 to stop).';
+        safety.style.background='#202e42';safety.style.color='#b9cde2';
+      }
+      $('irRawInfo').textContent='IR raw digital S1..S5: '+(d.rawIR||'—')+' | 1 means '+(d.blackLow?'HIGH (white if active-low)':'HIGH (black if active-high)');
+      if(!$('irPolarity').dataset.changed) $('irPolarity').value=d.blackLow?'1':'0';
+      $('ir').textContent='';
+      for(let i=0;i<5;i++){
+        const el=document.createElement('div');
+        el.className='sensor'+(d.black[i]==='1'?' on':'');
+        el.textContent='S'+(i+1);
+        $('ir').appendChild(el);
+      }
+    }catch(e){}finally{ refreshBusy=false; }
+  }
+
+  $('irPolarity').onchange=()=>$('irPolarity').dataset.changed='1';
+  $('saveIRPolarity').onclick=async()=>{
+    try{const r=await fetch('/ir/polarity',{method:'POST',body:new URLSearchParams({blackLow:$('irPolarity').value})});
+      $('irPolarityMsg').textContent=await r.text();
+      if(r.ok)delete $('irPolarity').dataset.changed;
+    }catch(e){$('irPolarityMsg').textContent=e.message;}
+  };
+  // TCS3200 live channels and calibration operations.
+  let colorRefreshBusy=false, lastColorSettings=null;
+  async function colorRequest(path,params){
+    const r=await fetch(path,{method:'POST',body:new URLSearchParams(params||{}),cache:'no-store'});
+    const t=await r.text(); $('colorNotice').textContent=t;
+    return r.ok;
+  }
+  $('captureColorBtn').onclick=()=>colorRequest('/color/capture',{
+    profile:$('captureProfile').value,color:$('captureColor').value});
+  $('saveColorSettings').onclick=()=>colorRequest('/color/settings',{
+    mode:$('colorMode').value,indoorTolerance:$('indoorTolerance').value,
+    outdoorTolerance:$('outdoorTolerance').value});
+  $('resetColorCal').onclick=async()=>{
+    if(confirm('Clear saved color references? Indoor defaults will return after restart.'))
+      await colorRequest('/color/reset');
+  };
+  async function refreshColor(){
+    if(colorRefreshBusy)return;
+    colorRefreshBusy=true;
+    try{
+      const resp=await fetch('/color/status',{cache:'no-store'});
+      if(!resp.ok)throw Error('Color API unavailable');
+      const d=await resp.json();
+      for(const [id,val] of [['colR',d.r],['colG',d.g],['colB',d.b],['colC',d.c]])
+        $(id).textContent=(val===null?'No signal':Number(val).toFixed(0));
+      const names=['GREEN','RED','BLUE','YELLOW'];
+      const profile=d.matchedProfile===0?'Indoor':d.matchedProfile===1?'Outdoor':'None';
+      $('colMatch').textContent=(d.fresh?'LIVE':'STALE')+' | Classified: '+
+        (d.station>=0?names[d.station]:'Track floor / unknown')+
+        ' | Profile: '+profile+' | Match distance: '+(d.distance===null?'—':Number(d.distance).toFixed(3));
+      const completed=p=>d.profiles[p].map((v,i)=>v?names[i]:null).filter(Boolean).join(', ')||'Not calibrated';
+      $('profileProgress').textContent='Indoor: '+completed(0)+' | Outdoor: '+completed(1);
+      if(!lastColorSettings){
+        $('colorMode').value=d.mode; $('indoorTolerance').value=d.indoorTolerance;
+        $('outdoorTolerance').value=d.outdoorTolerance;
+        lastColorSettings=true;
+      }
+      if(d.sampling) $('colorNotice').textContent=d.message;
+      else if(d.message&&d.message!=='Idle' && d.message!==$('colorNotice').dataset.lastMessage) {
+        $('colorNotice').textContent=d.message;$('colorNotice').dataset.lastMessage=d.message;
+      }
+    }catch(e){$('colMatch').textContent='Color API unavailable: '+e.message;}
+    finally{colorRefreshBusy=false;}
+  }
+  setInterval(refreshColor,500);refreshColor();
+
+  async function refreshWifiStatus(){
+    try{
+      const r=await fetch('/wifi/status',{cache:'no-store'});
+      if(!r.ok) throw new Error('Status endpoint unavailable');
+      const d=await r.json();
+      $('routerLink').textContent=d.connected?'CONNECTED':'NOT CONNECTED';
+      $('routerLink').style.color=d.connected?'#3fb950':'#ff9b69';
+      $('routerSsid').textContent=d.ssid||'Not configured';
+      $('routerIp').textContent=d.connected?d.ip:'No router IP';
+      $('routerRssi').textContent=d.connected?(d.rssi+' dBm'):'—';
+      $('apStatus').textContent=d.apActive?((d.apSsid||'AGV AP')+' / '+d.apIp):'NOT ACTIVE';
+      $('routerHost').textContent=d.hostname?d.hostname+'.local':'—';
+      $('wifiNotice').textContent=d.connected?'Connected to router. Local hostname depends on mDNS availability.':'Disconnected from router. AGV AP can still operate independently.';
+    }catch(e){$('routerLink').textContent='STATUS UNAVAILABLE';$('wifiNotice').textContent=e.message;}
+  }
+  $('wifiRefresh').onclick=refreshWifiStatus;
+  setInterval(refreshWifiStatus,3000);refreshWifiStatus();
+  $('floorCaptureBtn').onclick=async()=>{
+    $('floorNotice').textContent='Capturing floor reference... keep sensor stationary.';
+    try{
+      const r=await fetch('/color/capture',{method:'POST',body:new URLSearchParams({profile:$('floorProfile').value,color:'4'}),cache:'no-store'});
+      const t=await r.text();$('floorNotice').textContent=t;
+    }catch(e){$('floorNotice').textContent=e.message;}
+  };
+  $('floorGoIR').onclick=()=>document.querySelector('[data-menu="settings"]').click();
+  async function refreshFloorStatus(){
+    try{
+      const r=await fetch('/color/status',{cache:'no-store'});
+      if(!r.ok)return;
+      const d=await r.json();
+      $('floorIndoorStatus').textContent=d.floorIndoor?'CALIBRATED':'NOT CALIBRATED';
+      $('floorOutdoorStatus').textContent=d.floorOutdoor?'CALIBRATED':'NOT CALIBRATED';
+      if(d.sampling && d.message) $('floorNotice').textContent=d.message;
+      else if(d.message && d.message.startsWith('Saved ') && d.message.includes('FLOOR'))$('floorNotice').textContent=d.message;
+    }catch(e){}
+  }
+  setInterval(refreshFloorStatus,1600);refreshFloorStatus();
+
+
+  const stationNames=['Start / Finish','Workstation 1','Workstation 2','Workstation 3'];
+  const markerNames=['GREEN','RED','BLUE','YELLOW','DISABLED'];
+  const markerValues=[0,1,2,3,-1];
+  async function postForm(path,args){
+    const r=await fetch(path,{method:'POST',body:new URLSearchParams(args),cache:'no-store'});
+    const txt=await r.text();if(!r.ok)throw Error(txt);return txt;
+  }
+  function stationControl(slot,color,seconds){
+    const holder=document.createElement('div');holder.className='card';
+    const title=document.createElement('h4');title.textContent=stationNames[slot];holder.appendChild(title);
+    const sel=document.createElement('select');
+    markerValues.forEach((v,i)=>{const o=document.createElement('option');o.value=v;o.textContent=markerNames[i];sel.appendChild(o)});
+    sel.value=color;
+    const sec=document.createElement('input');sec.type='number';sec.min=0;sec.max=3600;sec.value=seconds;
+    const btn=document.createElement('button');btn.textContent='Save Station '+slot;
+    const status=document.createElement('small');
+    btn.onclick=async()=>{try{status.textContent=await postForm('/stations/config',{slot,color:sel.value,seconds:sec.value})}catch(e){status.textContent=e.message}};
+    const l1=document.createElement('label');l1.textContent='Marker color';l1.appendChild(sel);
+    const l2=document.createElement('label');l2.textContent='Auto-continue timeout (seconds, 0 = disabled)';l2.appendChild(sec);
+    holder.append(l1,l2,btn,status);return holder;
+  }
+  async function loadStationSettings(){
+    try{
+      const d=await (await fetch('/stations/status',{cache:'no-store'})).json();
+      $('stationRows').replaceChildren(...d.slots.map(x=>stationControl(x.slot,x.color,x.seconds)));
+      $('autoStation').checked=d.auto;
+      $('rfidSavedKeys').textContent='Master: '+d.rfid.master+'\n'+d.rfid.keys.map(k=>k.uid+' [stations mask '+k.mask+']').join('\n');
+    }catch(e){$('stationCountdown').textContent='Station settings unavailable: '+e.message}
+  }
+  $('saveAutoStation').onclick=async()=>{
+    try{await postForm('/stations/auto',{enabled:$('autoStation').checked?'1':'0'});loadStationSettings()}catch(e){$('stationCountdown').textContent=e.message}
+  };
+  async function lastCard(){
+    const d=await (await fetch('/rfid/latest',{cache:'no-store'})).json();
+    $('rfidLatest').textContent='UID '+(d.uid||'none')+' | age '+d.ageMs+' ms';
+    if(d.uid)$('rfidAssignUID').value=d.uid;
+  }
+  $('rfidReadLatest').onclick=()=>lastCard().catch(e=>$('rfidLatest').textContent=e.message);
+  async function updateRFIDHealth(){
+    try {
+      const r=await fetch('/rfid/health',{cache:'no-store'});
+      if(!r.ok)throw Error('RFID health API unavailable');
+      const d=await r.json();
+      $('rfidHealth').textContent=
+        'RC522 Version '+d.version+' | SPI '+(d.spiResponding?'RESPONDING':'ERROR')+
+        '\nTest mode '+(d.scanActive?'ACTIVE ('+d.remainingSec+' s remaining)':'OFF')+
+        '\nPolls '+d.polls+' | Valid UIDs '+d.successfulReads+
+        '\nNo-card timeouts '+d.noCardTimeouts+' | SPI failures '+d.spiFailures+
+        '\nWakeup errors '+d.wakeupErrors+' | UID selection failures '+d.selectFailures+
+        '\nLast UID '+(d.lastUID||'NONE')+' | Stored Master '+d.masterConfigured;
+      if(d.lastUID && !$('rfidAssignUID').value)$('rfidAssignUID').value=d.lastUID;
+    }catch(e){$('rfidHealth').textContent='Reader diagnostic unavailable: '+e.message}
+  }
+  $('rfidStartScan').onclick=async()=>{
+    try{
+      const msg=await postForm('/rfid/test',{});
+      $('rfidLatest').textContent=msg+'; remove and tap card';
+      updateRFIDHealth();
+    }catch(e){$('rfidLatest').textContent=e.message}
+  };
+  $('rfidReinit').onclick=async()=>{
+    try{
+      const msg=await postForm('/rfid/reinit',{});
+      $('rfidLatest').textContent='Reader reinitialized: '+msg;
+      updateRFIDHealth();
+    }catch(e){$('rfidLatest').textContent=e.message}
+  };
+  setInterval(()=>{if($('stations').classList.contains('active'))updateRFIDHealth()},1200);
+  updateRFIDHealth();
+  $('rfidSaveKey').onclick=async()=>{
+    let mask=0;document.querySelectorAll('#keyPermissions input:checked').forEach(n=>mask|=1<<Number(n.dataset.slot));
+    try{$('rfidMapNotice').textContent=await postForm('/rfid/assign',{uid:$('rfidAssignUID').value,mask});loadStationSettings()}
+    catch(e){$('rfidMapNotice').textContent=e.message}
+  };
+  $('rfidReplaceMaster').onclick=async()=>{
+    if(!confirm('Change Master UID? Present current Master first.'))return;
+    try{$('rfidMapNotice').textContent=await postForm('/rfid/master',{uid:$('rfidAssignUID').value});loadStationSettings()}
+    catch(e){$('rfidMapNotice').textContent=e.message}
+  };
+  loadStationSettings();
+  setInterval(async()=>{
+    if(!$('stations').classList.contains('active'))return;
+    try{const d=await (await fetch('/stations/status',{cache:'no-store'})).json();
+      $('stationCountdown').textContent=d.latched>0?'Station '+d.latched+' | '+(d.auto?'Auto-continue in '+d.remainingSec+' seconds':'Waiting for RFID or Web'):'No station waiting';
+    }catch(e){}
+  },1000);
+
+  const testLogKey='guideline-agv-load-tests-v1';
+  let testLog=[];try{testLog=JSON.parse(localStorage.getItem(testLogKey)||'[]');if(!Array.isArray(testLog))testLog=[]}catch(e){testLog=[]}
+  let testDeviceStartWall=null;
+  let lastRecordedStopMs=null;
+  function formatWall(d){return d?new Date(d).toLocaleString():'—'}
+  function renderTestRows(){
+    $('testRows').replaceChildren();
+    testLog.forEach(t=>{
+      const tr=document.createElement('tr');
+      [t.number,t.kg,t.pct,formatWall(t.start),formatWall(t.stop),(t.ms/1000).toFixed(3),t.reason].forEach(x=>{
+        const td=document.createElement('td');td.textContent=String(x);td.style.cssText='padding:6px;border-bottom:1px solid #34465c';tr.appendChild(td);
+      });$('testRows').appendChild(tr);
+    });
+  }
+  function persistTests(){localStorage.setItem(testLogKey,JSON.stringify(testLog));renderTestRows()}
+  renderTestRows();
+  $('testStart').onclick=async()=>{
+    try{
+      const d=JSON.parse(await postForm('/loadtest/start',{number:$('testNumber').value,kg:$('testLoad').value,speedPct:$('testSpeed').value}));
+      testDeviceStartWall=Date.now();lastRecordedStopMs=null;
+      $('testNotice').textContent='Test started';$('testLive').textContent='Test '+d.testNumber+' running';
+    }catch(e){$('testNotice').textContent=e.message}
+  };
+  $('testStop').onclick=async()=>{
+    try{await postForm('/loadtest/stop',{});$('testNotice').textContent='Stopped. Select Record Result.'}
+    catch(e){$('testNotice').textContent=e.message}
+  };
+  let currentTestStatus=null;
+  async function refreshLoadTest(){
+    if(!$('loadtest').classList.contains('active'))return;
+    try{
+      const d=await (await fetch('/loadtest/status',{cache:'no-store'})).json();currentTestStatus=d;
+      $('testLive').textContent='Test '+d.testNumber+' | '+(d.elapsedMs/1000).toFixed(3)+' s | '+d.reason;
+    }catch(e){$('testLive').textContent='Load-test status unavailable'}
+  }
+  setInterval(refreshLoadTest,400);
+  $('testRecord').onclick=async()=>{
+    try{
+      const d=await (await fetch('/loadtest/status',{cache:'no-store'})).json();
+      if(!d.recorded||d.active)throw Error('Finish a test before recording');
+      if(lastRecordedStopMs===d.stopMs || testLog.some(t=>t.stopMs===d.stopMs && t.deviceStartMs===d.startMs))throw Error('This result is already recorded');
+      const stop=Date.now();
+      const start=stop-d.elapsedMs; // Wall-clock display based on ESP32's measured duration.
+      testLog.push({number:d.testNumber,kg:d.loadKg,pct:d.speedPct,start,stop,ms:d.elapsedMs,
+        reason:d.reason,stopMs:d.stopMs,deviceStartMs:d.startMs});
+      lastRecordedStopMs=d.stopMs;persistTests();
+      $('testNotice').textContent='Result recorded in this browser';
+      $('testNumber').value=Number(d.testNumber)+1;
+    }catch(e){$('testNotice').textContent=e.message}
+  };
+  function downloadBlob(blob,name){
+    const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();
+    setTimeout(()=>URL.revokeObjectURL(url),2000);
+  }
+  $('testCsv').onclick=()=>{
+    const columns=['number','kg','pct','start','stop','ms','reason'];
+    const lines=[['test_number','load_kg','speed_pct','start_local','stop_local','duration_ms','result'].join(',')];
+    for(const t of testLog)lines.push(columns.map(k=>{
+      const v=k==='start'||k==='stop'?formatWall(t[k]):String(t[k]??'');return '"'+v.replace(/"/g,'""')+'"';
+    }).join(','));
+    downloadBlob(new Blob([lines.join('\r\n')],{type:'text/csv'}),'GUIDELine-load-tests.csv');
+  };
+  $('testClear').onclick=()=>{if(confirm('Clear locally saved test results?')){testLog=[];persistTests()}};
+  $('testSavePng').onclick=()=>{
+    if(!testLog.length){$('testNotice').textContent='Record a completed test first';return;}
+    // Offline, self-contained report rendering; no external screenshot library needed.
+    const w=1600,rowH=44,h=180+rowH*(testLog.length+1)+65;
+    const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
+    const ctx=canvas.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,w,h);
+    ctx.fillStyle='#152537';ctx.font='bold 36px Arial';ctx.fillText('GUIDELine AGV - Straight-Line Load Test Results',45,62);
+    ctx.font='22px Arial';ctx.fillText('Generated: '+new Date().toLocaleString(),45,105);
+    ctx.fillText('End condition: obstacle sensed (threshold may vary with surface)',45,136);
+    const widths=[90,130,130,350,350,175,240],heads=['Test','Load (kg)','Speed (%)','Start','Stop','Time (s)','Result'];
+    let x=45;ctx.fillStyle='#e8edf2';ctx.fillRect(40,163,1510,rowH);
+    ctx.fillStyle='#152537';ctx.font='bold 19px Arial';heads.forEach((v,i)=>{ctx.fillText(v,x+7,192);x+=widths[i]});
+    ctx.font='18px Arial';testLog.forEach((t,j)=>{
+      let y=163+rowH*(j+1);if(j%2===0){ctx.fillStyle='#f4f6f8';ctx.fillRect(40,y,1510,rowH)}
+      ctx.fillStyle='#152537';let cx=45;
+      [t.number,t.kg,t.pct,formatWall(t.start),formatWall(t.stop),(t.ms/1000).toFixed(3),t.reason].forEach((v,i)=>{
+        ctx.fillText(String(v).slice(0,i===6?23:28),cx+7,y+28);cx+=widths[i];
+      });
+    });
+    ctx.fillStyle='#53657a';ctx.font='17px Arial';ctx.fillText('Payload is user-entered. Duration measured by ESP32 millis(). No distance or actual velocity sensor.',45,h-29);
+    canvas.toBlob(b=>{if(b)downloadBlob(b,'GUIDELine-load-test-results.png')},'image/png');
+  };
+
+  setInterval(refresh, 250);
+</script>
+</body>
+</html>)AGVHTML";
