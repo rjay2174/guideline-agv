@@ -31,6 +31,10 @@ extern bool isMotionBlocked();
 extern bool isAllIRBlack();
 extern bool isAllIRBlackSafetyLatched();
 extern uint32_t getAllIRBlackElapsedMs();
+extern Preferences potCalPrefs;
+extern uint16_t speedPotCalMin, speedPotCalMax;
+extern uint16_t speedPotCaptureMin, speedPotCaptureMax;
+extern bool speedPotCalEnabled, speedPotMinCaptured, speedPotMaxCaptured;
 extern uint16_t speedPotRaw;
 extern uint16_t speedPotFiltered;
 extern int speedPotPwm;
@@ -523,6 +527,75 @@ public:
       server.send(200,"application/json",loadTest.json());
     });
 
+    // Physical speed knob calibration. Never calibrate while moving.
+    server.on("/pot/cal/status", HTTP_GET, [this]() {
+      server.sendHeader("Cache-Control","no-store");
+      String j="{\"raw\":"+String(speedPotRaw)+",\"min\":"+String(speedPotCalMin)+
+               ",\"max\":"+String(speedPotCalMax)+",\"enabled\":"+
+               String(speedPotCalEnabled?"true":"false")+
+               ",\"captureMin\":"+String(speedPotCaptureMin)+
+               ",\"captureMax\":"+String(speedPotCaptureMax)+
+               ",\"hasMin\":"+String(speedPotMinCaptured?"true":"false")+
+               ",\"hasMax\":"+String(speedPotMaxCaptured?"true":"false")+"}";
+      server.send(200,"application/json",j);
+    });
+    server.on("/pot/cal/capture", HTTP_POST, [this]() {
+      if(state!=IDLE || loadTest.active || motors.getAppliedL()!=0 || motors.getAppliedR()!=0) {
+        server.send(409,"text/plain","STOP/RESET and wait for motors to stop before calibrating");return;
+      }
+      const String endpoint=server.arg("end");
+      if(endpoint!="min" && endpoint!="max") {
+        server.send(400,"text/plain","Select min or max endpoint");return;
+      }
+      // Read a fresh averaged ADC level rather than stale filtered value.
+      uint32_t sum=0;
+      for(int i=0;i<32;i++) sum+=analogRead(PIN_SPEED_POT);
+      const uint16_t reading=uint16_t(sum/32);
+      if(endpoint=="min") {speedPotCaptureMin=reading;speedPotMinCaptured=true;}
+      else {speedPotCaptureMax=reading;speedPotMaxCaptured=true;}
+      server.send(200,"text/plain",String(endpoint)+" captured: ADC "+String(reading)+" / 4095");
+    });
+    server.on("/pot/cal/save", HTTP_POST, [this]() {
+      if(state!=IDLE || loadTest.active || motors.getAppliedL()!=0 || motors.getAppliedR()!=0) {
+        server.send(409,"text/plain","STOP/RESET before saving calibration");return;
+      }
+      if(!speedPotMinCaptured || !speedPotMaxCaptured) {
+        server.send(400,"text/plain","Capture BOTH minimum and maximum knob positions first");return;
+      }
+      if(int(speedPotCaptureMax)-int(speedPotCaptureMin)<150) {
+        server.send(400,"text/plain","ADC span too small or endpoints reversed; inspect potentiometer wiring");return;
+      }
+      if(speedPotCaptureMax>=4070 && speedPotCaptureMin>800) {
+        // Valid math, but the high-end may be saturated. Warn instead of
+        // rejecting a user-requested calibration that can still be useful.
+        Serial.println("[POT] WARNING: ADC reaches high rail early; verify 3.3 V wiper wiring");
+      }
+      const size_t a=potCalPrefs.putUShort("min",speedPotCaptureMin);
+      const size_t b=potCalPrefs.putUShort("max",speedPotCaptureMax);
+      const size_t c=potCalPrefs.putBool("valid",true);
+      if(a!=sizeof(uint16_t) || b!=sizeof(uint16_t) || c!=1) {
+        server.send(500,"text/plain","Calibration could not be saved to NVS");return;
+      }
+      speedPotCalMin=speedPotCaptureMin;
+      speedPotCalMax=speedPotCaptureMax;
+      speedPotCalEnabled=true;
+      speedPotMinCaptured=false;speedPotMaxCaptured=false;
+      updatePhysicalSpeedPot(true);
+      server.send(200,"text/plain","Saved ADC "+String(speedPotCalMin)+" to "+String(speedPotCalMax)+" as PWM 0 to 255");
+    });
+    server.on("/pot/cal/reset", HTTP_POST, [this]() {
+      if(state!=IDLE || loadTest.active || motors.getAppliedL()!=0 || motors.getAppliedR()!=0) {
+        server.send(409,"text/plain","STOP/RESET before resetting calibration");return;
+      }
+      if(potCalPrefs.putBool("valid",false)!=1) {
+        server.send(500,"text/plain","Cannot reset NVS calibration");return;
+      }
+      speedPotCalEnabled=false;speedPotCalMin=0;speedPotCalMax=4095;
+      speedPotCaptureMin=0;speedPotCaptureMax=4095;
+      speedPotMinCaptured=false;speedPotMaxCaptured=false;
+      updatePhysicalSpeedPot(true);
+      server.send(200,"text/plain","Calibration cleared; using ADC 0..4095");
+    });
     // 4. API Endpoints
     server.on("/status", HTTP_GET, [this]() {
       String s = "{";
@@ -531,6 +604,10 @@ public:
       s += "\"distCm\":" + String(sensors.getDistanceCm()) + ",";
       s += "\"speed\":" + String(int((motors.maxSpeed / 255.0) * 100)) + ",";
       s += "\"potRaw\":"+String(speedPotRaw)+",";
+      s += "\"potCalMin\":"+String(speedPotCalMin)+",";
+      s += "\"potCalMax\":"+String(speedPotCalMax)+",";
+      s += "\"potCalEnabled\":"+String(speedPotCalEnabled?"true":"false")+",";
+
       s += "\"potFiltered\":"+String(speedPotFiltered)+",";
       s += "\"potPwm\":"+String(speedPotPwm)+",";
       s += "\"maxPwm\":"+String(motors.maxSpeed)+",";
