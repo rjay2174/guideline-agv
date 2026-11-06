@@ -4,7 +4,7 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-06-pot-primary-speed">
+  <meta name="agv-ui-version" content="2026-11-06-router-status-ip">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -155,6 +155,8 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
     <label>Connect to Router SSID: <input id="staSsid" type="text"></label>
     <label>Router Password: <input id="staPass" type="password"></label>
     <button id="saveStaWifi">Connect Router</button>
+    <p id="routerJoinResult" role="status" aria-live="polite" style="color:#9db0c7;font-weight:600">Enter the router SSID and password to connect.</p>
+    <p><a id="routerOpenIp" href="#" style="color:#58a6ff;display:none" target="_self">Open AGV through router IP</a></p>
     <hr style="border:0;border-top:1px solid #28394e;margin:18px 0">
     <h3>Cloud Firmware Update (GitHub)</h3>
     <button id="btnGithubOta" style="background:#238636">Check & Install GitHub Update</button>
@@ -403,7 +405,34 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
   };
   $('reset').onclick=()=>act('/reset');
   $('saveSafety').onclick=()=>act('/safety?dist='+$('safetyDist').value);
-  $('saveStaWifi').onclick=()=>act('/wifi/sta?ssid='+encodeURIComponent($('staSsid').value)+'&pass='+encodeURIComponent($('staPass').value));
+  let routerJoinRequested=false;
+  let routerJoinSince=0;
+  let wifiStatusBusy=false;
+  $('saveStaWifi').onclick=async()=>{
+    const ssid=$('staSsid').value.trim();
+    const pass=$('staPass').value;
+    if(!ssid || ssid.length>32){
+      $('routerJoinResult').textContent='Enter a valid router SSID (1–32 characters).';
+      $('routerJoinResult').style.color='#ff9b69'; return;
+    }
+    $('saveStaWifi').disabled=true;
+    $('routerJoinResult').textContent='CONNECTING to '+ssid+'... Checking router association and IP address.';
+    $('routerJoinResult').style.color='#f1c40f';
+    $('routerLink').textContent='CONNECTING...';
+    routerJoinRequested=true;routerJoinSince=Date.now();
+    try {
+      // POST body rather than URL query, so the router password is not exposed in URLs.
+      const r=await fetch('/wifi/sta',{method:'POST',body:new URLSearchParams({ssid,pass}),cache:'no-store'});
+      const message=await r.text();
+      if(!r.ok)throw Error(message || 'Router request rejected');
+      // Association takes seconds; HTTP 202 is not proof of connection.
+      await refreshWifiStatus();
+    }catch(e){
+      routerJoinRequested=false;
+      $('routerJoinResult').textContent='CONNECT FAILED: '+e.message;
+      $('routerJoinResult').style.color='#ff9b69';
+    }finally{$('saveStaWifi').disabled=false;}
+  };
 
   $('btnGithubOta').onclick=async()=>{
     if(confirm("Download latest firmware from GitHub? The vehicle will lock its motors and reboot.")){
@@ -505,22 +534,60 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
   setInterval(refreshColor,500);refreshColor();
 
   async function refreshWifiStatus(){
+    if(wifiStatusBusy)return;
+    wifiStatusBusy=true;
     try{
       const r=await fetch('/wifi/status',{cache:'no-store'});
       if(!r.ok) throw new Error('Status endpoint unavailable');
       const d=await r.json();
-      $('routerLink').textContent=d.connected?'CONNECTED':'NOT CONNECTED';
-      $('routerLink').style.color=d.connected?'#3fb950':'#ff9b69';
+      const phase=d.routerPhase || (d.connected?'connected':'disconnected');
+      $('routerLink').textContent=phase==='connected'?'CONNECTED':phase==='connecting'?'CONNECTING...':phase==='failed'?'FAILED':'NOT CONNECTED';
+      $('routerLink').style.color=d.connected?'#3fb950':phase==='connecting'?'#f1c40f':'#ff9b69';
       $('routerSsid').textContent=d.ssid||'Not configured';
-      $('routerIp').textContent=d.connected?d.ip:'No router IP';
+      $('routerIp').textContent=d.connected&&d.ip?d.ip:'No router IP';
       $('routerRssi').textContent=d.connected?(d.rssi+' dBm'):'—';
       $('apStatus').textContent=d.apActive?((d.apSsid||'AGV AP')+' / '+d.apIp):'NOT ACTIVE';
       $('routerHost').textContent=d.hostname?d.hostname+'.local':'—';
-      $('wifiNotice').textContent=d.connected?'Connected to router. Local hostname depends on mDNS availability.':'Disconnected from router. AGV AP can still operate independently.';
-    }catch(e){$('routerLink').textContent='STATUS UNAVAILABLE';$('wifiNotice').textContent=e.message;}
+      const link=$('routerOpenIp');
+      if(d.connected && d.ip){
+        link.href='http://'+d.ip+'/';
+        link.textContent='Open AGV controller at http://'+d.ip+'/';
+        link.style.display='inline';
+      }else{link.style.display='none';}
+      if(phase==='connected' && d.ip){
+        $('routerJoinResult').textContent='CONNECTED SUCCESSFULLY to '+(d.ssid||'router')+' | IP address: '+d.ip;
+        $('routerJoinResult').style.color='#3fb950';
+        routerJoinRequested=false;
+      }else if(phase==='connecting'){
+        const seconds=Math.floor((d.routerElapsedMs||0)/1000);
+        $('routerJoinResult').textContent='CONNECTING to '+(d.ssid||'router')+'... '+seconds+' s elapsed. Waiting for router-assigned IP.';
+        $('routerJoinResult').style.color='#f1c40f';
+      }else if(phase==='failed'){
+        $('routerJoinResult').textContent='CONNECTION FAILED: '+(d.routerMessage||d.wifiStatusText||'No router response');
+        $('routerJoinResult').style.color='#ff9b69';
+        routerJoinRequested=false;
+      }else if(routerJoinRequested){
+        $('routerJoinResult').textContent='Waiting for router response... AGV Access Point may temporarily change channel.';
+        $('routerJoinResult').style.color='#f1c40f';
+        if(Date.now()-routerJoinSince>25000)routerJoinRequested=false;
+      }else {
+        $('routerJoinResult').textContent='NOT CONNECTED. Enter router credentials and press Connect Router.';
+        $('routerJoinResult').style.color='#9db0c7';
+      }
+      $('wifiNotice').textContent=d.connected?'AGV connected to router. You can use either its router IP or the AGV Access Point.':'AGV AP remains available when possible. Router connection and AP share one Wi-Fi channel; changing channels may briefly disconnect this page.';
+    }catch(e){
+      $('routerLink').textContent='STATUS UNAVAILABLE';
+      $('wifiNotice').textContent='Could not reach AGV: '+e.message+'. If the AP channel changed, reconnect to GUIDELine-AGV and reopen 192.168.4.1.';
+      if(routerJoinRequested){
+        $('routerJoinResult').textContent='Connection to AGV interrupted while joining router. Reconnect to the AGV AP and refresh to verify its router IP.';
+        $('routerJoinResult').style.color='#f1c40f';
+      }
+    }finally{wifiStatusBusy=false;}
   }
   $('wifiRefresh').onclick=refreshWifiStatus;
-  setInterval(refreshWifiStatus,3000);refreshWifiStatus();
+  setInterval(refreshWifiStatus,3000);
+  setInterval(()=>{if(routerJoinRequested)refreshWifiStatus();},1200);
+  refreshWifiStatus();
   $('floorCaptureBtn').onclick=async()=>{
     $('floorNotice').textContent='Capturing floor reference... keep sensor stationary.';
     try{
