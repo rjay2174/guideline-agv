@@ -10,8 +10,8 @@ struct DynamicStation {
   char keyUID[24];
 };
 
-constexpr const char* AGV_FW_BUILD = "2026-11-06.4-router-status-ip";
-constexpr const char* AGV_UI_BUILD = "2026-11-06-router-status-ip";
+constexpr const char* AGV_FW_BUILD = "2026-11-06.5-pot-calibration";
+constexpr const char* AGV_UI_BUILD = "2026-11-06-pot-calibration";
 
 enum RunState : uint8_t {
   IDLE,
