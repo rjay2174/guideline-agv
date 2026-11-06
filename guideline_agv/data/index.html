@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-06-pot-calibration">
+  <meta name="agv-ui-version" content="2026-11-06-center234-pot-range">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -88,7 +88,7 @@
     <div class="stat-box">
       <div class="stat-title">Potentiometer calibration</div>
       <p id="potCalInfo">Loading saved endpoints...</p>
-      <p style="color:#9db0c7">STOP/RESET first. Rotate fully counter-clockwise, capture MIN. Rotate fully clockwise, capture MAX. Then save. No phone is needed after calibration; endpoints are stored in the ESP32.</p>
+      <p style="color:#9db0c7">STOP/RESET first. Rotate fully counter-clockwise, capture MIN. Rotate fully clockwise, capture MAX. Then save. The two endpoints must be at least 2048 ADC counts apart. No phone is needed after calibration; endpoints are stored in the ESP32.</p>
       <div class="grid">
         <button id="potCaptureMin">Capture MIN (0 PWM)</button>
         <button id="potCaptureMax">Capture MAX (255 PWM)</button>
@@ -465,7 +465,7 @@
       $('station').textContent=d.station;
       $('uiDistance').textContent=d.distCm>0?d.distCm+' cm':'Clear';
       $('uiSpeed').textContent=d.speed+'%';
-      if($('potLive')) $('potLive').textContent='ADC '+d.potRaw+'/4095 | POT '+d.potPwm+'/255 | Effective '+d.maxPwm+'/255';
+      if($('potLive')) $('potLive').textContent='ADC '+d.potRaw+'/4095 | Raw PWM '+d.potRawPwm+'/255 | Calibrated '+d.potPwm+'/255 | Motor limit '+d.maxPwm+'/255';
       if($('potCalInfo') && !potCalBusy) $('potCalInfo').textContent=
         (d.potCalEnabled?'Saved calibration':'Default full ADC range')+
         ': MIN '+d.potCalMin+' | MAX '+d.potCalMax;
