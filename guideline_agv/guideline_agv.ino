@@ -97,6 +97,16 @@ AGVSerialConsole console;
 // Physical POT is the primary PWM ceiling; Web/Load Test cannot exceed it.
 // No phone is required. ADC 0..4095 maps to 0..255, without a forced
 // minimum PWM (zero MUST stop). Update every 40 ms with noise filtering.
+// Saved two-endpoint calibration; only effective after explicit Save.
+// Calibration remains in ESP32 NVS when power is removed.
+Preferences potCalPrefs;
+uint16_t speedPotCalMin = 0;
+uint16_t speedPotCalMax = 4095;
+bool speedPotCalEnabled = false;
+uint16_t speedPotCaptureMin = 0;
+uint16_t speedPotCaptureMax = 4095;
+bool speedPotMinCaptured = false;
+bool speedPotMaxCaptured = false;
 uint16_t speedPotRaw = 0;
 uint16_t speedPotFiltered = 0;
 int speedPotPwm = 0;
@@ -116,10 +126,15 @@ void updatePhysicalSpeedPot(bool force=false) {
   speedPotRaw=sample;
   if(force) speedPotFiltered=sample;
   else speedPotFiltered=uint16_t((3UL*speedPotFiltered + sample + 2UL)/4UL);
-  // ADC end-zone compensation; no minimum moving speed is imposed.
-  speedPotPwm = int((uint32_t(speedPotFiltered)*255UL+2047UL)/4095UL);
-  if(speedPotFiltered <= 20) speedPotPwm = 0;
-  if(speedPotFiltered >= 4075) speedPotPwm = 255;
+  // Calibrated span maps the physical end stops to full 0..255 range.
+  // A small deadband prevents low-end ADC noise from creeping the AGV.
+  const int lo = speedPotCalEnabled ? int(speedPotCalMin) : 0;
+  const int hi = speedPotCalEnabled ? int(speedPotCalMax) : 4095;
+  const int range = max(1, hi-lo);
+  const int adjusted = constrain(int(speedPotFiltered)-lo,0,range);
+  speedPotPwm = (adjusted*255 + range/2)/range;
+  if(adjusted <= max(4,range/100)) speedPotPwm = 0;
+  if(adjusted >= range-max(4,range/100)) speedPotPwm = 255;
   motors.maxSpeed = min(speedPotPwm, loadTest.active ? loadTestPwmCeiling : 255);
   if(motors.maxSpeed == 0) motors.stop();
   else if(motors.getAppliedL()>motors.maxSpeed || motors.getAppliedR()>motors.maxSpeed)
@@ -324,7 +339,19 @@ void setup() {
   // Initialize hardware modules with verified pins
   motors.begin(PIN_L_RPWM, PIN_L_LPWM, PIN_R_RPWM, PIN_R_LPWM, PIN_MOT_EN, maxMotorSpeed, innerWheelReductionPct, steeringSensitivity);
   analogReadResolution(12);
+  // GPIO3 must receive ONLY 0..3.3 V from the wiper of a 10k pot.
+  analogSetPinAttenuation(PIN_SPEED_POT, ADC_11db);
   pinMode(PIN_SPEED_POT, INPUT);
+  if(potCalPrefs.begin("agv-pot",false)) {
+    const uint16_t storedMin=potCalPrefs.getUShort("min",0);
+    const uint16_t storedMax=potCalPrefs.getUShort("max",4095);
+    const bool saved=potCalPrefs.getBool("valid",false);
+    if(saved && storedMax>storedMin+100 && storedMax<=4095) {
+      speedPotCalMin=storedMin;speedPotCalMax=storedMax;speedPotCalEnabled=true;
+    }
+  }
+  speedPotCaptureMin=speedPotCalMin;
+  speedPotCaptureMax=speedPotCalMax;
   updatePhysicalSpeedPot(true); // Apply physical speed ceiling before RFID start
   sensors.beginIR(PIN_IR_S1, PIN_IR_S2, PIN_IR_S3, PIN_IR_S4, PIN_IR_S5);
   sensors.beginSonar(PIN_US_TRIG, PIN_US_ECHO, safetyStopDistanceCm);
