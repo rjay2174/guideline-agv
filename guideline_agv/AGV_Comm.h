@@ -41,6 +41,9 @@ extern uint16_t speedPotFiltered;
 extern int speedPotPwm;
 extern int loadTestPwmCeiling;
 extern char lastNavigationEvent[120];
+extern bool routeStarted;
+extern bool departedGreen;
+extern uint8_t homeAwayValidFrames;
 extern void updatePhysicalSpeedPot(bool force);
 
 class AGVComm {
@@ -701,10 +704,14 @@ public:
       s += "\"state\":\"" + String(getStateName(state)) + "\",";
       // A live color classification is not proof of a confirmed station marker.
       s += "\"station\":\"" + String(state==STATION_WAIT ? "Confirmed workstation stop" :
-           state==FINISHED ? "Confirmed GREEN finish" : "No confirmed station") + "\",";
+           state==FINISHED ? "Confirmed HOME finish" : "No confirmed station") + "\",";
       s += "\"colorCandidate\":\"" + String(sensors.getCurrentStationName()) + "\",";
       s += "\"colorDistance\":" + (isfinite(sensors.getColorDistance()) ? String(sensors.getColorDistance(),5) : String("null")) + ",";
       s += "\"lastEvent\":\"" + String(lastNavigationEvent) + "\",";
+      s += "\"homeColor\":"+String(stations.colors[0])+",";
+      s += "\"lapActive\":"+String(routeStarted?"true":"false")+",";
+      s += "\"homeFinishArmed\":"+String(departedGreen?"true":"false")+",";
+      s += "\"homeAwayValidFrames\":"+String(homeAwayValidFrames)+",";
       s += "\"distCm\":" + String(sensors.getDistanceCm()) + ",";
       s += "\"speed\":" + String(int((motors.maxSpeed / 255.0) * 100)) + ",";
       s += "\"potRaw\":"+String(speedPotRaw)+",";
