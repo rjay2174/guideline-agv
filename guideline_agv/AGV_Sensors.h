@@ -396,6 +396,7 @@ public:
   int getDistanceCm() { return distanceCm; }
   Reading getColorReading() const { return colorSample; }
   int getCurrentStationIndex() { return currentStationIdx; }
+  uint32_t getColorCycleId() const { return colorCycleId; }
 
   const char* getCurrentStationName() {
     switch (currentStationIdx) {
