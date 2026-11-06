@@ -36,6 +36,7 @@ extern uint16_t speedPotCalMin, speedPotCalMax;
 extern uint16_t speedPotCaptureMin, speedPotCaptureMax;
 extern bool speedPotCalEnabled, speedPotMinCaptured, speedPotMaxCaptured;
 extern uint16_t speedPotRaw;
+extern int speedPotRawPwm;
 extern uint16_t speedPotFiltered;
 extern int speedPotPwm;
 extern int loadTestPwmCeiling;
@@ -562,8 +563,8 @@ public:
       if(!speedPotMinCaptured || !speedPotMaxCaptured) {
         server.send(400,"text/plain","Capture BOTH minimum and maximum knob positions first");return;
       }
-      if(int(speedPotCaptureMax)-int(speedPotCaptureMin)<150) {
-        server.send(400,"text/plain","ADC span too small or endpoints reversed; inspect potentiometer wiring");return;
+      if(int(speedPotCaptureMax)-int(speedPotCaptureMin)<2048) {
+        server.send(400,"text/plain","Calibration span too narrow. Rotate to both FULL stops; require >=2048 ADC counts. Reset saved calibration if needed.");return;
       }
       if(speedPotCaptureMax>=4070 && speedPotCaptureMin>800) {
         // Valid math, but the high-end may be saturated. Warn instead of
@@ -604,6 +605,7 @@ public:
       s += "\"distCm\":" + String(sensors.getDistanceCm()) + ",";
       s += "\"speed\":" + String(int((motors.maxSpeed / 255.0) * 100)) + ",";
       s += "\"potRaw\":"+String(speedPotRaw)+",";
+      s += "\"potRawPwm\":"+String(speedPotRawPwm)+",";
       s += "\"potCalMin\":"+String(speedPotCalMin)+",";
       s += "\"potCalMax\":"+String(speedPotCalMax)+",";
       s += "\"potCalEnabled\":"+String(speedPotCalEnabled?"true":"false")+",";
