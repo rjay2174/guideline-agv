@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-06-router-status-ip">
+  <meta name="agv-ui-version" content="2026-11-06-pot-calibration">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -85,6 +85,19 @@
     <h3>Physical Speed Knob (GPIO3)</h3>
     <p>The physical 10 kOhm potentiometer controls speed without a phone. Turn to zero to stop wheel PWM. Automatic steering correction, bridge and recovery speeds scale with it.</p>
     <div class="stat-box"><div class="stat-title">Potentiometer speed (0-4095 ADC)</div><strong id="potLive">Waiting for sensor...</strong></div>
+    <div class="stat-box">
+      <div class="stat-title">Potentiometer calibration</div>
+      <p id="potCalInfo">Loading saved endpoints...</p>
+      <p style="color:#9db0c7">STOP/RESET first. Rotate fully counter-clockwise, capture MIN. Rotate fully clockwise, capture MAX. Then save. No phone is needed after calibration; endpoints are stored in the ESP32.</p>
+      <div class="grid">
+        <button id="potCaptureMin">Capture MIN (0 PWM)</button>
+        <button id="potCaptureMax">Capture MAX (255 PWM)</button>
+        <button id="potSaveCal">Save Calibration</button>
+        <button id="potResetCal" style="background:#3c5069">Reset Calibration</button>
+      </div>
+      <p id="potCalMessage" role="status" style="color:#8fd4ff"></p>
+      <p style="color:#e8c58b">If ADC hits 4095 after only 1/4 turn, calibration cannot recover the remaining travel. Verify the potentiometer wiper is connected to GPIO3, outer ends to 3.3 V and GND, and never apply 5 V to GPIO3.</p>
+    </div>
     <p style="color:#9db0c7">Very low PWM may not overcome motor friction. Load Test speed percentage can only reduce the knob's maximum.</p>
     <h3>Safety Settings</h3>
     <label>Obstacle Stop Distance (cm): <input id="safetyDist" type="number" min="5" max="80" value="20"></label>
@@ -453,6 +466,9 @@
       $('uiDistance').textContent=d.distCm>0?d.distCm+' cm':'Clear';
       $('uiSpeed').textContent=d.speed+'%';
       if($('potLive')) $('potLive').textContent='ADC '+d.potRaw+'/4095 | POT '+d.potPwm+'/255 | Effective '+d.maxPwm+'/255';
+      if($('potCalInfo') && !potCalBusy) $('potCalInfo').textContent=
+        (d.potCalEnabled?'Saved calibration':'Default full ADC range')+
+        ': MIN '+d.potCalMin+' | MAX '+d.potCalMax;
       $('event').textContent=d.event;
       const safety=$('irAllBlackSafety');
       if(d.irAllBlackLatched){
@@ -478,6 +494,31 @@
     }catch(e){}finally{ refreshBusy=false; }
   }
 
+  let potCalBusy=false;
+  async function potCalRequest(url, data={}) {
+    const response=await fetch(url,{method:'POST',body:new URLSearchParams(data),cache:'no-store'});
+    const message=await response.text();
+    if(!response.ok)throw Error(message);
+    return message;
+  }
+  async function potCalButton(id,url,data={}) {
+    if(potCalBusy)return;
+    potCalBusy=true;
+    $('potCalMessage').textContent='Reading...';
+    try{
+      $('potCalMessage').textContent=await potCalRequest(url,data);
+      const d=await (await fetch('/pot/cal/status',{cache:'no-store'})).json();
+      $('potCalInfo').textContent=(d.enabled?'Saved calibration':'Default full ADC range')+
+        ': MIN '+d.min+' | MAX '+d.max+
+        (d.hasMin?' | Pending MIN '+d.captureMin:'')+
+        (d.hasMax?' | Pending MAX '+d.captureMax:'');
+    }catch(e){$('potCalMessage').textContent='Calibration error: '+e.message;}
+    finally{potCalBusy=false;}
+  }
+  $('potCaptureMin').onclick=()=>potCalButton('potCaptureMin','/pot/cal/capture',{end:'min'});
+  $('potCaptureMax').onclick=()=>potCalButton('potCaptureMax','/pot/cal/capture',{end:'max'});
+  $('potSaveCal').onclick=()=>potCalButton('potSaveCal','/pot/cal/save');
+  $('potResetCal').onclick=()=>potCalButton('potResetCal','/pot/cal/reset');
   $('irPolarity').onchange=()=>$('irPolarity').dataset.changed='1';
   $('saveIRPolarity').onclick=async()=>{
     try{const r=await fetch('/ir/polarity',{method:'POST',body:new URLSearchParams({blackLow:$('irPolarity').value})});
