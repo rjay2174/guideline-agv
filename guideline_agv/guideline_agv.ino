@@ -517,7 +517,7 @@ void handleAutonomousFollow() {
   // Keep OUTER wheel at the requested PWM; slow only INSIDE wheel.
   // Gains are initial bench-tuning defaults, not validated coefficients.
   const float gainFactor = constrain(motors.steeringGain / 1.20f, 0.60f, 1.50f);
-  const float kp = 95.0f * gainFactor;
+  const float kp = 135.0f * gainFactor;
   const float kd = 0.30f * gainFactor;
   const int outer = requested;
   const int correction = constrain(int(lroundf(kp * fabsf(err) +
