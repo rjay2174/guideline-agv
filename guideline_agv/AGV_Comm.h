@@ -31,6 +31,11 @@ extern bool isMotionBlocked();
 extern bool isAllIRBlack();
 extern bool isAllIRBlackSafetyLatched();
 extern uint32_t getAllIRBlackElapsedMs();
+extern uint16_t speedPotRaw;
+extern uint16_t speedPotFiltered;
+extern int speedPotPwm;
+extern int loadTestPwmCeiling;
+extern void updatePhysicalSpeedPot(bool force);
 
 class AGVComm {
 private:
@@ -139,8 +144,8 @@ private:
   }
 
   bool startAccessPoint() {
-    // SoftAP and router STA share one radio channel. Use router's channel
-    // when already associated, otherwise use channel 1 for predictable AP.
+    // In AP+STA mode both interfaces MUST share one radio channel. If the
+    // router is linked, put AP on that channel; otherwise use predictable 1.
     const int staChannel = WiFi.status()==WL_CONNECTED ? WiFi.channel() : 1;
     const int channel = (staChannel>=1 && staChannel<=11) ? staChannel : 1;
     bool ok=WiFi.softAP(apName.c_str(),apKey.c_str(),channel,false,4);
@@ -157,8 +162,8 @@ private:
       Serial.println("[WIFI] No STA SSID set, AP remains available.");
       return;
     }
-    // A router retry can change the SoftAP channel and disconnect iPhone.
-    // Keep the direct AP control session stable until its client leaves.
+    // A router retry can force AP to change channel and disconnect an iPhone.
+    // Preserve the direct AP session over automatic router reconnection.
     if(reconnect && WiFi.softAPgetStationNum()>0) {
       lastRouterRetryMs=millis();
       return;
@@ -219,7 +224,7 @@ public:
     routerName.trim();
     WiFi.mode(WIFI_AP_STA);
     WiFi.setHostname(DEVICE_HOSTNAME); // Before softAP()/WiFi.begin(), as in working v1.9.15.
-    WiFi.setAutoReconnect(false); // Explicit router retries; do not disrupt AP clients.
+    WiFi.setAutoReconnect(false); // AP clients take priority; controlled STA retries below.
     WiFi.setSleep(false); // Helps on routers prone to ESP32 STA sleep/reconnect delays.
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
     bool apConfigured=WiFi.softAPConfig(IPAddress(192,168,4,1),IPAddress(192,168,4,1),IPAddress(255,255,255,0));
@@ -469,12 +474,13 @@ public:
       }
       motors.stop();
       loadTest.begin(uint16_t(n),kg,uint8_t(pct),motors.maxSpeed);
-      motors.maxSpeed=constrain(int(lroundf(255.0f*pct/100.0f)),1,255);
+      loadTestPwmCeiling=constrain(int(lroundf(255.0f*pct/100.0f)),1,255);
+      updatePhysicalSpeedPot(true);
       state=LOAD_TEST_RUN;
       server.send(200,"application/json",loadTest.json());
     });
     server.on("/loadtest/stop",HTTP_POST,[this](){
-      if(loadTest.active){motors.stop();loadTest.finish("MANUAL STOP");motors.maxSpeed=loadTest.savedSpeed;state=IDLE;}
+      if(loadTest.active){motors.stop();loadTest.finish("MANUAL STOP");loadTestPwmCeiling=255;updatePhysicalSpeedPot(true);state=IDLE;}
       server.send(200,"application/json",loadTest.json());
     });
     server.on("/loadtest/status",HTTP_GET,[this](){
@@ -489,6 +495,11 @@ public:
       s += "\"station\":\"" + String(sensors.getCurrentStationName()) + "\",";
       s += "\"distCm\":" + String(sensors.getDistanceCm()) + ",";
       s += "\"speed\":" + String(int((motors.maxSpeed / 255.0) * 100)) + ",";
+      s += "\"potRaw\":"+String(speedPotRaw)+",";
+      s += "\"potFiltered\":"+String(speedPotFiltered)+",";
+      s += "\"potPwm\":"+String(speedPotPwm)+",";
+      s += "\"maxPwm\":"+String(motors.maxSpeed)+",";
+      s += "\"loadTestPwmCeiling\":"+String(loadTest.active ? loadTestPwmCeiling : 255)+",";
       s += "\"event\":\"" + String(isAllIRBlackSafetyLatched() ? "ALL FIVE IR BLACK - SAFETY STOP" : "Operational") + "\",";
       s += "\"stationRemainingSec\":"+String((state==STATION_WAIT && latchedStation>0 && stationWaitStartMs && stations.autoContinue)?
         max(0L,long(stations.timeoutSec[latchedStation])-long((millis()-stationWaitStartMs)/1000UL)):0L)+",";
@@ -625,8 +636,9 @@ public:
          wifiStatusText(WiFi.status()),int(WiFi.status()));
     }
     if(!linked && uint32_t(millis()-lastRouterRetryMs)>=30000) {
+      // Avoid disrupting captive-portal clients with channel hopping.
       if(WiFi.softAPgetStationNum()==0) connectRouter(true);
-      else lastRouterRetryMs=millis(); // AP control user has priority
+      else lastRouterRetryMs=millis();
     }
     if(!linked && uint32_t(millis()-lastRouterStatusMs)>=10000) {
       lastRouterStatusMs=millis();
