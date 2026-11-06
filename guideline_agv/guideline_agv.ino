@@ -108,6 +108,7 @@ uint16_t speedPotCaptureMax = 4095;
 bool speedPotMinCaptured = false;
 bool speedPotMaxCaptured = false;
 uint16_t speedPotRaw = 0;
+int speedPotRawPwm = 0;
 uint16_t speedPotFiltered = 0;
 int speedPotPwm = 0;
 int loadTestPwmCeiling = 255;
@@ -124,6 +125,9 @@ void updatePhysicalSpeedPot(bool force=false) {
   for(int n=0;n<8;n++) sum += analogRead(PIN_SPEED_POT);
   const uint16_t sample=uint16_t(sum/8);
   speedPotRaw=sample;
+  // Diagnostic, uncalibrated 0-4095 PWM. Distinguishes a bad NVS
+  // calibration from an actual ADC or power/wiring problem.
+  speedPotRawPwm=int((uint32_t(sample)*255UL+2047UL)/4095UL);
   if(force) speedPotFiltered=sample;
   else speedPotFiltered=uint16_t((3UL*speedPotFiltered + sample + 2UL)/4UL);
   // Calibrated span maps the physical end stops to full 0..255 range.
@@ -346,13 +350,22 @@ void setup() {
     const uint16_t storedMin=potCalPrefs.getUShort("min",0);
     const uint16_t storedMax=potCalPrefs.getUShort("max",4095);
     const bool saved=potCalPrefs.getBool("valid",false);
-    if(saved && storedMax>storedMin+100 && storedMax<=4095) {
+    // A severely compressed calibration makes the pot reach full PWM
+    // before its physical end stop. Reject that NVS span on boot.
+    if(saved && storedMax>storedMin &&
+       int(storedMax)-int(storedMin)>=2048 && storedMax<=4095) {
       speedPotCalMin=storedMin;speedPotCalMax=storedMax;speedPotCalEnabled=true;
+      Serial.printf("[POT] NVS calibration loaded: MIN=%u MAX=%u\n",storedMin,storedMax);
+    } else if(saved) {
+      Serial.printf("[POT] REJECTED narrow/invalid NVS calibration MIN=%u MAX=%u; using full ADC 0..4095\n",storedMin,storedMax);
     }
   }
   speedPotCaptureMin=speedPotCalMin;
   speedPotCaptureMax=speedPotCalMax;
   updatePhysicalSpeedPot(true); // Apply physical speed ceiling before RFID start
+  Serial.printf("[POT] Initial RAW=%u, RAW_PWM=%d, CAL_PWM=%d, effective MAX=%d, calibrated=%s\n",
+                speedPotRaw,speedPotRawPwm,speedPotPwm,motors.maxSpeed,
+                speedPotCalEnabled?"YES":"NO");
   sensors.beginIR(PIN_IR_S1, PIN_IR_S2, PIN_IR_S3, PIN_IR_S4, PIN_IR_S5);
   sensors.beginSonar(PIN_US_TRIG, PIN_US_ECHO, safetyStopDistanceCm);
   sensors.beginColor(PIN_COLOR_S0, PIN_COLOR_S1, PIN_COLOR_S2, PIN_COLOR_S3, PIN_COLOR_OUT);
@@ -453,6 +466,11 @@ void handleStationTimeout(){
 // intended line while S1/S5 also sees a junction, ignore the side branch.
 // Do not classify 11111 as ordinary track; retain the all-black safeguard.
 static inline bool hasCenterWithOuterBranch(uint8_t irMask) {
+  // S2+S3+S4 (01110) is a three-sensor wide track: hold straight.
+  // As soon as it narrows to two sensors, use normal weighted steering.
+  if (irMask == 0x0Eu) return true;
+  // At branch intersections, S3 wins over the outer S1/S5 line.
+  // Never suppress the 11111 all-black safety detection.
   return (irMask & 0x04u) != 0 && (irMask & 0x11u) != 0 && irMask != 0x1Fu;
 }
 
@@ -577,7 +595,8 @@ void handleAutonomousFollow() {
   lineLostAt = 0;
   const uint8_t mask = sensors.getIRBits();
   const bool centerPriority = hasCenterWithOuterBranch(mask);
-  // S3 and an outer junction branch active: continue along center.
+  // S3 + an outer junction branch, or S2+S3+S4, follows center.
+  // The 01110 wide-line override ends immediately at two active sensors.
   const float err = centerPriority ? 0.0f : sensors.getLineError();
   lastKnownLineError = err;
   const int requested = motors.maxSpeed;
