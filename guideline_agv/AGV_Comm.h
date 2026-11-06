@@ -139,11 +139,15 @@ private:
   }
 
   bool startAccessPoint() {
-    // No WiFi.mode(WIFI_AP) or WiFi.disconnect(true): both would lose STA.
-    bool ok=WiFi.softAP(apName.c_str(),apKey.c_str(),1,false,4);
+    // SoftAP and router STA share one radio channel. Use router's channel
+    // when already associated, otherwise use channel 1 for predictable AP.
+    const int staChannel = WiFi.status()==WL_CONNECTED ? WiFi.channel() : 1;
+    const int channel = (staChannel>=1 && staChannel<=11) ? staChannel : 1;
+    bool ok=WiFi.softAP(apName.c_str(),apKey.c_str(),channel,false,4);
     if(ok) {
       dnsServer.start(53,"*",WiFi.softAPIP());
-      Serial.printf("[PORTAL] AP ACTIVE | SSID=%s | IP=%s\n",apName.c_str(),WiFi.softAPIP().toString().c_str());
+      Serial.printf("[PORTAL] AP ACTIVE | SSID=%s | IP=%s | channel=%d | clients=%d\n",
+          apName.c_str(),WiFi.softAPIP().toString().c_str(),channel,WiFi.softAPgetStationNum());
     } else Serial.println("[PORTAL] ERROR: softAP() returned false; check Wi-Fi mode/board reset");
     return ok;
   }
@@ -151,6 +155,12 @@ private:
   void connectRouter(bool reconnect=false) {
     if(routerName.isEmpty()) {
       Serial.println("[WIFI] No STA SSID set, AP remains available.");
+      return;
+    }
+    // A router retry can change the SoftAP channel and disconnect iPhone.
+    // Keep the direct AP control session stable until its client leaves.
+    if(reconnect && WiFi.softAPgetStationNum()>0) {
+      lastRouterRetryMs=millis();
       return;
     }
     lastRouterRetryMs=millis();
@@ -209,7 +219,7 @@ public:
     routerName.trim();
     WiFi.mode(WIFI_AP_STA);
     WiFi.setHostname(DEVICE_HOSTNAME); // Before softAP()/WiFi.begin(), as in working v1.9.15.
-    WiFi.setAutoReconnect(true);
+    WiFi.setAutoReconnect(false); // Explicit router retries; do not disrupt AP clients.
     WiFi.setSleep(false); // Helps on routers prone to ESP32 STA sleep/reconnect delays.
     WiFi.setTxPower(WIFI_POWER_19_5dBm);
     bool apConfigured=WiFi.softAPConfig(IPAddress(192,168,4,1),IPAddress(192,168,4,1),IPAddress(255,255,255,0));
@@ -615,11 +625,8 @@ public:
          wifiStatusText(WiFi.status()),int(WiFi.status()));
     }
     if(!linked && uint32_t(millis()-lastRouterRetryMs)>=30000) {
-      if(routerAttempts<2) connectRouter(true);
-      else {
-        // Reapply explicit NVS credentials in case the router changed channel/restarted.
-        connectRouter(true);
-      }
+      if(WiFi.softAPgetStationNum()==0) connectRouter(true);
+      else lastRouterRetryMs=millis(); // AP control user has priority
     }
     if(!linked && uint32_t(millis()-lastRouterStatusMs)>=10000) {
       lastRouterStatusMs=millis();
@@ -629,6 +636,9 @@ public:
     }
     if(uint32_t(millis()-lastAPCheckMs)>=15000) {
       lastAPCheckMs=millis();
+      Serial.printf("[PORTAL] health SSID=%s | IP=%s | APclients=%d | STA=%s | radioChannel=%d\n",
+          WiFi.softAPSSID().c_str(),WiFi.softAPIP().toString().c_str(),
+          WiFi.softAPgetStationNum(),linked?"CONNECTED":"OFFLINE",WiFi.channel());
       if(WiFi.softAPSSID().isEmpty()) {
         Serial.println("[PORTAL] AP unexpectedly absent; restoring AP+STA mode");
         WiFi.mode(WIFI_AP_STA);
