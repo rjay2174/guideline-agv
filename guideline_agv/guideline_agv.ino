@@ -57,10 +57,20 @@ bool  enableManualBypass      = false; // Safety guard cannot be bypassed
 // 3. COLOR DETECTION PRESETS (Chromaticity Scaled)
 // -------------------------------------------------------------------------
 #include "AGV_Config.h"
-Reading CAL_GREEN_START       = { 768.28f,  910.89f,  946.80f, 2768.75f};
-Reading CAL_RED_STATION       = {1491.26f,  819.48f, 1007.61f, 3357.40f};
-Reading CAL_BLUE_STATION      = { 781.22f,  924.22f, 1396.21f, 3242.95f};
-Reading CAL_YELLOW_STATION    = {1860.25f, 1473.57f, 1212.82f, 4675.39f};
+// TCS3200 bench readings from the actual AGV sensor, indoor/outdoor.
+// Order: GREEN, RED, BLUE, YELLOW; units: Hz (R,G,B,C).
+Reading CAL_INDOOR[4] = {
+  {1639.08f, 2369.12f, 1877.58f, 5882.35f}, // GREEN
+  {3369.86f, 1509.44f, 1894.66f, 6493.51f}, // RED
+  {1495.66f, 2154.48f, 3871.48f, 7518.88f}, // BLUE
+  {4334.69f, 3225.81f, 2091.40f, 9643.39f} // YELLOW
+};
+Reading CAL_OUTDOOR[4] = {
+  { 6277.67f, 5366.44f, 4894.97f, 11363.64f}, // GREEN
+  { 8558.80f, 4339.88f, 4877.31f, 12400.63f}, // RED
+  { 6004.80f, 5052.04f, 6998.20f, 12963.35f}, // BLUE
+  {12225.42f, 7657.25f, 6546.86f, 19212.63f}  // YELLOW
+};
 
 // -------------------------------------------------------------------------
 // 4. OPERATOR WI-FI ACCESS POINT
@@ -171,6 +181,7 @@ bool departedGreen = false;
 bool visitedRedStation = false;
 bool lastStationWasRed = false;
 int latchedStation = -1;
+char lastNavigationEvent[120] = "Ready - awaiting authorized START";
 uint8_t nextStationSlot=1;  // 1..3, reset on new route
 uint32_t stationWaitStartMs=0;
 uint32_t lastStationTimerLog=0;
@@ -369,7 +380,7 @@ void setup() {
   sensors.beginIR(PIN_IR_S1, PIN_IR_S2, PIN_IR_S3, PIN_IR_S4, PIN_IR_S5);
   sensors.beginSonar(PIN_US_TRIG, PIN_US_ECHO, safetyStopDistanceCm);
   sensors.beginColor(PIN_COLOR_S0, PIN_COLOR_S1, PIN_COLOR_S2, PIN_COLOR_S3, PIN_COLOR_OUT);
-  sensors.loadColorPresets(CAL_GREEN_START, CAL_RED_STATION, CAL_BLUE_STATION, CAL_YELLOW_STATION);
+  sensors.loadColorPresets(CAL_INDOOR, CAL_OUTDOOR);
   rfid.begin(PIN_RFID_SCK, PIN_RFID_MISO, PIN_RFID_MOSI, PIN_RFID_SS, PIN_RFID_RST);
   stations.begin();
   comm.begin(AP_HOTSPOT_SSID, AP_HOTSPOT_PASS);
@@ -382,11 +393,12 @@ void setup() {
   Serial.println("==================================================");
   Serial.println("       GUIDELine AGV Physical Core Online         ");
   Serial.printf("[FW] Build %s | UI %s\n",AGV_FW_BUILD,AGV_UI_BUILD);
-  Serial.printf ("       Connect AP: %s (Key: %s)\n", AP_HOTSPOT_SSID, AP_HOTSPOT_PASS);
+  Serial.println("       AP details: use WIFI STATUS; AP password not printed.");
   Serial.println("==================================================");
 }
 
 void logEvent(const char* msg) {
+  strlcpy(lastNavigationEvent, msg, sizeof(lastNavigationEvent));
   Serial.printf("[%lu][EVENT] %s\n", (unsigned long)millis(), msg);
 }
 
@@ -436,16 +448,23 @@ void handleStationDetection() {
   if(routeStarted && detected<0) departedGreen=true;
   if((int32_t)(millis()-departHoldUntil)<0) return;
   if(!sensors.detectsStationMarker())return;
-  // GREEN (configurable start/finish) only ends a journey after at least one station.
-  if(detected==stations.colors[0] && routeStarted && departedGreen && visitedRedStation) {
+  // Never accept GREEN as a return marker while a configured workstation
+  // is still pending; ordinary floor can briefly resemble green under light.
+  bool workstationsComplete = true;
+  for (uint8_t slot = nextStationSlot; slot <= 3; ++slot) {
+    if (stations.colors[slot] >= 0) { workstationsComplete = false; break; }
+  }
+  if(detected==stations.colors[0] && routeStarted && departedGreen &&
+     visitedRedStation && workstationsComplete) {
     motors.stop();state=FINISHED;routeStarted=false;
-    logEvent("Return marker reached: trip complete"); return;
+    logEvent("Confirmed GREEN return marker: all configured stations complete"); return;
   }
   // Physical stations 1..3 are ordered. Repeated marker colors are allowed.
   if(nextStationSlot<=3 && stations.colors[nextStationSlot]>=0 &&
      detected==stations.colors[nextStationSlot] && routeStarted && departedGreen){
     motors.stop();state=STATION_WAIT;latchedStation=nextStationSlot;
     stationWaitStartMs=millis();
+    logEvent("Confirmed workstation color: awaiting RFID/Web acknowledgement");
     Serial.printf("[STATION] Slot %u: detected color %d; waiting for assigned RFID or web\n",nextStationSlot,detected);
   }
 }
