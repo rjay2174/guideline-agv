@@ -120,12 +120,22 @@ public:
     diagnosticScanEnabled=false;
     lastCardUID="";
   }
-  // Requiring card removal at each station prevents an old held RFID tap
-  // from being reused after arrival; timed and Web starts still work.
+  // Only demand removal when a card was actually observed just before stop.
+  // Otherwise the first new station RFID tap must be accepted immediately.
   void requireFreshTap() {
+    const bool cardStillRecent = lastSeenUID.length() &&
+      (uint32_t)(millis()-lastSeenMs) < 750UL;
     lastCardUID="";
-    requireCardRemoval=true;
+    requireCardRemoval=cardStillRecent;
     cardAbsentSinceMs=0;
+    lastDeliveredUID="";
+    lastDeliveredMs=0;
+    if (!cardStillRecent) {
+      lastSeenUID="";
+      lastSeenMs=0;
+    }
+    Serial.printf("[RFID] Fresh-tap ready: %s\n",
+      requireCardRemoval ? "remove held card, then tap again" : "new tap accepted immediately");
   }
   void reinitialize() {
     if (!pReader) return;
@@ -240,10 +250,11 @@ public:
     if (!pReader) { Serial.println("[RFID] Reader object not initialized"); return; }
     uint8_t version=pReader->PCD_ReadRegister(MFRC522::VersionReg);
     Serial.printf("[RFID TEST] SPI SCK=12 MISO=13 MOSI=16 SS=17 RST=18 | VersionReg=0x%02X | %s\n",version,(version==0x00||version==0xFF)?"SPI FAILED":"SPI RESPONDING");
-    Serial.printf("[RFID TEST] polls=%lu SPIbad=%lu noCard=%lu wakeError=%lu selectFail=%lu UIDread=%lu | master=%s | lastUID=%s | DIAG=%s\n",
+    Serial.printf("[RFID TEST] polls=%lu SPIbad=%lu noCard=%lu wakeError=%lu selectFail=%lu UIDread=%lu | master=%s | lastUID=%s | DIAG=%s | waitingRemoval=%s\n",
       (unsigned long)scanPollCount,(unsigned long)versionReadFailures,(unsigned long)noCardTimeouts,
       (unsigned long)wakeupFailures,(unsigned long)selectFailures,(unsigned long)successfulReads,
-      masterUID.c_str(),lastSeenUID.length()?lastSeenUID.c_str():"NONE",isDiagnosticActive()?"ON":"OFF");
+      masterUID.c_str(),lastSeenUID.length()?lastSeenUID.c_str():"NONE",isDiagnosticActive()?"ON":"OFF",
+      requireCardRemoval?"YES":"NO");
     Serial.println("[RFID TEST] Remove card, then tap the Master Card; watch for [RFID] SCANNED UID.");
   }
   String diagnosticJSON() const {
@@ -260,6 +271,7 @@ public:
     j+=",\"selectFailures\":"+String(selectFailures);
     j+=",\"successfulReads\":"+String(successfulReads);
     j+=",\"lastUID\":\""+lastSeenUID+"\"";
+    j+=",\"waitingCardRemoval\":"+String(requireCardRemoval?"true":"false");
     j+=",\"masterConfigured\":\""+masterUID+"\"}";
     return j;
   }
