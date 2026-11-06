@@ -202,14 +202,15 @@ public:
       return;
     }
     cardAbsentSinceMs=0;
+    MFRC522::StatusCode sel = pReader->PICC_Select(&pReader->uid);
+    if (sel != MFRC522::STATUS_OK) { selectFailures++; return; }
+    successfulReads++;
     if (requireCardRemoval) {
+      // A still-present card is observed but cannot trigger authorization.
       pReader->PICC_HaltA();
       pReader->PCD_StopCrypto1();
       return;
     }
-    MFRC522::StatusCode sel = pReader->PICC_Select(&pReader->uid);
-    if (sel != MFRC522::STATUS_OK) { selectFailures++; return; }
-    successfulReads++;
 
     String uid = "";
     for (byte i = 0; i < pReader->uid.size; i++) {
