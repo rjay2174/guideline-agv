@@ -10,7 +10,7 @@ struct DynamicStation {
   char keyUID[24];
 };
 
-constexpr const char* AGV_FW_BUILD = "2026-11-06.1-ap-stable-fast-pd";
+constexpr const char* AGV_FW_BUILD = "2026-11-06.2-s3-center-priority";
 constexpr const char* AGV_UI_BUILD = "2026-11-06-ap-stable-fast-pd";
 
 enum RunState : uint8_t {
