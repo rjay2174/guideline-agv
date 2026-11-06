@@ -10,8 +10,8 @@ struct DynamicStation {
   char keyUID[24];
 };
 
-constexpr const char* AGV_FW_BUILD = "2026-11-06.9-green-finish-speed";
-constexpr const char* AGV_UI_BUILD = "2026-11-06-green-finish-speed";
+constexpr const char* AGV_FW_BUILD = "2026-11-06.10-repeatable-home-lap";
+constexpr const char* AGV_UI_BUILD = "2026-11-06-repeatable-home-lap";
 
 enum RunState : uint8_t {
   IDLE,
@@ -53,6 +53,8 @@ constexpr uint32_t ALL_IR_BLACK_STOP_MS = 3000;
 constexpr uint8_t ALL_IR_BLACK_MASK = 0x1Fu; // S1..S5 = 11111
 constexpr uint32_t RFID_REARM_MS = 900;
 constexpr uint32_t STATION_DEPARTURE_MS = 900;
+constexpr uint32_t HOME_DEPARTURE_GUARD_MS = 1800;
+constexpr uint8_t HOME_DEPARTURE_AWAY_FRAMES = 5;
 
 inline const char* getStateName(RunState s) {
   switch (s) {
