@@ -10,8 +10,8 @@ struct DynamicStation {
   char keyUID[24];
 };
 
-constexpr const char* AGV_FW_BUILD = "2026-11-06.8-indoor-outdoor-colors";
-constexpr const char* AGV_UI_BUILD = "2026-11-06-indoor-outdoor-colors";
+constexpr const char* AGV_FW_BUILD = "2026-11-06.9-green-finish-speed";
+constexpr const char* AGV_UI_BUILD = "2026-11-06-green-finish-speed";
 
 enum RunState : uint8_t {
   IDLE,
