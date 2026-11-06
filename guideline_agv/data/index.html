@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-06-center234-pot-range">
+  <meta name="agv-ui-version" content="2026-11-06-indoor-outdoor-colors">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -45,6 +45,7 @@
     <div id="irRawInfo" style="font-size:13px;color:#9db0c7">IR raw: —</div>
     <div id="irAllBlackSafety" role="status" style="margin-top:8px;padding:10px;border-radius:8px;background:#202e42;color:#b9cde2;font-size:14px">All-five-IR safety: monitoring</div>
     <div style="margin-top:8px;color:#8b9eb7;font-size:14px">Status: <span id="event" style="color:#f0f4f8">Ready</span></div>
+    <div style="margin-top:6px;color:#8b9eb7;font-size:13px">Color reading (unconfirmed): <span id="colorCandidateMain">—</span></div>
   </div>
 
   <nav id="nav">
@@ -122,14 +123,19 @@
       <select id="captureColor"><option value="0">GREEN (start/finish)</option><option value="1">RED (station)</option><option value="2">BLUE</option><option value="3">YELLOW</option><option value="4">FLOOR (background)</option></select>
     </label>
     <button id="captureColorBtn">Capture & Save Reference</button>
+    <div style="margin-top:14px;padding:12px;border:1px solid #3d5473;border-radius:10px">
+      <strong>Measured indoor/outdoor reference set</strong>
+      <p style="color:#9db0c7">Apply the recorded TCS3200 readings for GREEN, RED, BLUE and YELLOW in both lighting conditions. Existing station color references will be replaced and saved to NVS. Floor calibration is kept. Stop the AGV before applying.</p>
+      <button id="applyMeasuredColors" style="background:#295d86">Apply Measured References (Indoor + Outdoor)</button>
+    </div>
     <div id="profileProgress" style="margin-top:10px;color:#9db0c7">Indoor: —; Outdoor: —</div>
     <h4>Recognition thresholds</h4>
     <p style="color:#9db0c7">The threshold is maximum normalized RGB distance (0.025–0.300). Lower values reject more uncertain colors. Start with the defaults and adjust using the live match distance.</p>
     <label>Active recognition profile
       <select id="colorMode"><option value="2">Automatic (indoor + outdoor)</option><option value="0">Indoor only</option><option value="1">Outdoor only</option></select>
     </label>
-    <label>Indoor tolerance <input id="indoorTolerance" type="number" min="0.025" max="0.300" step="0.005" value="0.085"></label>
-    <label>Outdoor tolerance <input id="outdoorTolerance" type="number" min="0.025" max="0.300" step="0.005" value="0.115"></label>
+    <label>Indoor tolerance <input id="indoorTolerance" type="number" min="0.025" max="0.300" step="0.005" value="0.050"></label>
+    <label>Outdoor tolerance <input id="outdoorTolerance" type="number" min="0.025" max="0.300" step="0.005" value="0.045"></label>
     <div class="row"><button id="saveColorSettings">Save Settings to ESP32</button><button id="resetColorCal" style="background:#604c36">Clear Saved Calibration</button></div>
     <p id="colorNotice" style="color:#58a6ff">Choose a color and press Capture while stationary.</p>
   </div></section>
@@ -163,11 +169,24 @@
     </div>
     <button id="wifiRefresh" style="background:#3a4c63">Refresh Wi-Fi Status</button>
     <p id="wifiNotice" style="color:#9db0c7">Connection status is read from the ESP32.</p>
-    <label>Connect to Router SSID: <input id="staSsid" type="text"></label>
+    <div class="row"><button id="scanRouters" type="button" style="background:#3a4c63">Scan Nearby Wi-Fi</button>
+      <span id="scanRouterStatus" role="status" style="color:#9db0c7">Scan while stopped</span></div>
+    <label>Available router networks
+      <select id="wifiNetworks"><option value="">Select a scanned network...</option></select></label>
+    <label>Connect to Router SSID: <input id="staSsid" type="text" maxlength="32" autocomplete="off"></label>
     <label>Router Password: <input id="staPass" type="password"></label>
     <button id="saveStaWifi">Connect Router</button>
     <p id="routerJoinResult" role="status" aria-live="polite" style="color:#9db0c7;font-weight:600">Enter the router SSID and password to connect.</p>
     <p><a id="routerOpenIp" href="#" style="color:#58a6ff;display:none" target="_self">Open AGV through router IP</a></p>
+    <hr style="border:0;border-top:1px solid #28394e;margin:18px 0">
+    <h3>AGV Access Point Settings</h3>
+    <p>Change the direct Wi-Fi name and password. Settings are stored in ESP32 NVS and take effect only after restarting the AGV. Keep a record of the new password.</p>
+    <label>AGV AP Name: <input id="newApSsid" type="text" maxlength="32" autocomplete="off" placeholder="GUIDELine-AGV"></label>
+    <label>New AP Password: <input id="newApPass" type="password" minlength="8" maxlength="63" autocomplete="new-password" placeholder="8–63 characters"></label>
+    <div class="row"><button id="saveApSettings">Save AP Settings</button>
+      <button id="resetApSettings" style="background:#604c36">Restore Factory AP</button>
+      <button id="restartForAp" style="background:#3a4c63">Restart AGV to Apply</button></div>
+    <p id="apSettingsNotice" role="status" style="color:#9db0c7"></p>
     <hr style="border:0;border-top:1px solid #28394e;margin:18px 0">
     <h3>Cloud Firmware Update (GitHub)</h3>
     <button id="btnGithubOta" style="background:#238636">Check & Install GitHub Update</button>
@@ -419,6 +438,57 @@
   let routerJoinRequested=false;
   let routerJoinSince=0;
   let wifiStatusBusy=false;
+  $('wifiNetworks').onchange=()=>{
+    if($('wifiNetworks').value) $('staSsid').value=$('wifiNetworks').value;
+  };
+  $('scanRouters').onclick=async()=>{
+    $('scanRouters').disabled=true;
+    $('scanRouterStatus').textContent='Scanning...';
+    try{
+      const r=await fetch('/wifi/scan/start',{method:'POST',cache:'no-store'});
+      if(!r.ok)throw Error(await r.text());
+      let done=false;
+      for(let attempt=0;attempt<25;attempt++){
+        await new Promise(resolve=>setTimeout(resolve,400));
+        const resp=await fetch('/wifi/scan/results',{cache:'no-store'});
+        if(!resp.ok)throw Error('Scan results unavailable');
+        const j=await resp.json();
+        if(j.state==='done'){
+          $('wifiNetworks').replaceChildren(new Option('Select a scanned network...', ''));
+          const unique=new Set();
+          for(const net of j.networks){
+            if(unique.has(net.ssid))continue;
+            unique.add(net.ssid);
+            $('wifiNetworks').add(new Option(net.ssid+' ('+net.rssi+' dBm, Ch '+net.channel+(net.secure?', secured':'')+')',net.ssid));
+          }
+          $('scanRouterStatus').textContent=unique.size+' network(s) found';
+          done=true; break;
+        }
+        if(j.state==='idle')throw Error('Scan timed out/failed');
+      }
+      if(!done)throw Error('Scan timed out. Try again while stopped.');
+    }catch(e){$('scanRouterStatus').textContent='Scan unavailable: '+e.message;}
+    finally{$('scanRouters').disabled=false;}
+  };
+  $('saveApSettings').onclick=async()=>{
+    const ssid=$('newApSsid').value.trim(),pass=$('newApPass').value;
+    if(!ssid || ssid.length>32 || pass.length<8 || pass.length>63){
+      $('apSettingsNotice').textContent='Enter a name (1–32 characters) and password (8–63 characters).';return;
+    }
+    if(!confirm('Save a new AGV Wi-Fi name and password? You must reconnect after restart.'))return;
+    try{$('apSettingsNotice').textContent=await postForm('/wifi/ap',{ssid,pass});$('newApPass').value='';}
+    catch(e){$('apSettingsNotice').textContent=e.message;}
+  };
+  $('resetApSettings').onclick=async()=>{
+    if(!confirm('Restore the original AGV AP name and password after restart?'))return;
+    try{$('apSettingsNotice').textContent=await postForm('/wifi/ap/defaults',{});}
+    catch(e){$('apSettingsNotice').textContent=e.message;}
+  };
+  $('restartForAp').onclick=async()=>{
+    if(!confirm('Restart AGV now to apply saved AP settings? Motors must be stopped.'))return;
+    try{$('apSettingsNotice').textContent=await postForm('/wifi/ap/restart',{});}
+    catch(e){$('apSettingsNotice').textContent=e.message;}
+  };
   $('saveStaWifi').onclick=async()=>{
     const ssid=$('staSsid').value.trim();
     const pass=$('staPass').value;
@@ -463,13 +533,15 @@
       const d=await r.json();
       $('state').textContent=d.state;
       $('station').textContent=d.station;
+      $('colorCandidateMain').textContent=d.colorCandidate||'Unknown';
+      $('event').title='Last navigation event: '+(d.lastEvent||'—');
       $('uiDistance').textContent=d.distCm>0?d.distCm+' cm':'Clear';
       $('uiSpeed').textContent=d.speed+'%';
       if($('potLive')) $('potLive').textContent='ADC '+d.potRaw+'/4095 | Raw PWM '+d.potRawPwm+'/255 | Calibrated '+d.potPwm+'/255 | Motor limit '+d.maxPwm+'/255';
       if($('potCalInfo') && !potCalBusy) $('potCalInfo').textContent=
         (d.potCalEnabled?'Saved calibration':'Default full ADC range')+
         ': MIN '+d.potCalMin+' | MAX '+d.potCalMax;
-      $('event').textContent=d.event;
+      $('event').textContent=d.event + (d.lastEvent?' | '+d.lastEvent:'');
       const safety=$('irAllBlackSafety');
       if(d.irAllBlackLatched){
         safety.textContent='SAFETY STOP: All 5 IR sensors read BLACK for 3 seconds. Clear the sensor pattern, then tap Master RFID or use START/RESET.';
@@ -538,6 +610,14 @@
   $('saveColorSettings').onclick=()=>colorRequest('/color/settings',{
     mode:$('colorMode').value,indoorTolerance:$('indoorTolerance').value,
     outdoorTolerance:$('outdoorTolerance').value});
+  $('applyMeasuredColors').onclick=async()=>{
+    if(!confirm('Replace existing indoor/outdoor marker references with the measured Nov 6 values? Floor references will be preserved.'))return;
+    try{
+      await colorRequest('/color/apply-measured');
+      lastColorSettings=null;
+      await refreshColor();
+    }catch(e){$('colorNotice').textContent='Could not apply measured color references: '+e.message;}
+  };
   $('resetColorCal').onclick=async()=>{
     if(confirm('Clear saved color references? Indoor defaults will return after restart.'))
       await colorRequest('/color/reset');
@@ -586,6 +666,7 @@
       $('routerIp').textContent=d.connected&&d.ip?d.ip:'No router IP';
       $('routerRssi').textContent=d.connected?(d.rssi+' dBm'):'—';
       $('apStatus').textContent=d.apActive?((d.apSsid||'AGV AP')+' / '+d.apIp):'NOT ACTIVE';
+      if(!$('newApSsid').dataset.edited) $('newApSsid').value=d.apPending||d.apSsid||'GUIDELine-AGV';
       $('routerHost').textContent=d.hostname?d.hostname+'.local':'—';
       const link=$('routerOpenIp');
       if(d.connected && d.ip){
@@ -623,6 +704,7 @@
       }
     }finally{wifiStatusBusy=false;}
   }
+  $('newApSsid').oninput=()=>$('newApSsid').dataset.edited='1';
   $('wifiRefresh').onclick=refreshWifiStatus;
   setInterval(refreshWifiStatus,3000);
   setInterval(()=>{if(routerJoinRequested)refreshWifiStatus();},1200);
