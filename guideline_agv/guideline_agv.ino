@@ -489,6 +489,7 @@ void handleStationDetection() {
     routeStarted=false;
     latchedStation=-1;
     stationWaitStartMs=0;
+    rfid.requireFreshTap();
     logEvent("HOME confirmed: lap complete; tap RFID or Web START for next lap");
     return;
   }
@@ -499,6 +500,7 @@ void handleStationDetection() {
     state=STATION_WAIT;
     latchedStation=nextStationSlot;
     stationWaitStartMs=millis();
+    rfid.requireFreshTap();
     logEvent("Confirmed workstation color: RFID, Web or station timer to continue");
     Serial.printf("[STATION] Slot %u: confirmed color %d; waiting for authorization or timer\n",nextStationSlot,detected);
   }
