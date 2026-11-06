@@ -178,9 +178,11 @@ uint32_t obstacleHoldStartedAt = 0;
 uint32_t lineLostAt = 0;
 float lastKnownLineError = 0.0f;
 uint32_t departHoldUntil = 0;
-uint32_t routeAuthorizedAtMs = 0; // Initial start marker cannot instantly finish a lap.
+uint32_t routeAuthorizedAtMs = 0;
+uint32_t lastDepartureColorCycle = 0;
+uint8_t homeAwayValidFrames = 0;
 bool routeStarted = false;
-bool departedGreen = false;
+bool departedGreen = false; // True only after confirmed departure this lap.
 bool visitedRedStation = false;
 bool lastStationWasRed = false;
 int latchedStation = -1;
@@ -295,6 +297,8 @@ void requestSafeStop() {
   // An explicit STOP / RESET cancels the route and requires a new START.
   routeStarted = false;
   routeAuthorizedAtMs = 0;
+  lastDepartureColorCycle = sensors.getColorCycleId();
+  homeAwayValidFrames = 0;
   departedGreen = false;
   visitedRedStation = false;
   lastStationWasRed = false;
@@ -303,7 +307,9 @@ void requestSafeStop() {
 
 bool requestAutonomousStart(bool resetFault) {
   if(rfid.isDiagnosticActive()) return false;
-  if(state==LOAD_TEST_RUN || state==SERVICE_TEST || state==MANUAL) return false;
+  // START is valid only from a stopped/recovery state, never while FOLLOWing.
+  if(state!=IDLE && state!=FINISHED && state!=STATION_WAIT &&
+     state!=FAULT_STOP && state!=RECOVERY_SEARCH) return false;
   motors.stop();
   if (!sensors.isPathClear() || sensors.captureBusy()) return false;
   // INSTANT START INHIBIT: reject Master, Web START, station acknowledgement,
@@ -325,14 +331,16 @@ bool requestAutonomousStart(bool resetFault) {
     if(nextStationSlot<=3) nextStationSlot=uint8_t(latchedStation+1);
   }
   // Starting a new journey resets route progress, while station ACK keeps it.
-  if (state == IDLE || state == FINISHED) {
+  if (state == IDLE || state == FINISHED || (state == FAULT_STOP && !routeStarted)) {
+    // Authorized restart from HOME resets finish detection for each new lap.
     routeStarted = true;
     routeAuthorizedAtMs = millis();
+    lastDepartureColorCycle = sensors.getColorCycleId();
+    homeAwayValidFrames = 0;
     departedGreen = false;
     visitedRedStation = false;
     lastStationWasRed = false;nextStationSlot=1;
   }
-  if (state == FAULT_STOP) routeStarted = true;
   state = FOLLOW;
   lineLostAt = 0;
   // Allow the vehicle to move off its current station marker before rereading.
@@ -447,30 +455,52 @@ void handleCardAuthorization() {
 }
 
 void handleStationDetection() {
+  const uint32_t now=millis();
   const int detected=sensors.getCurrentStationIndex();
-  if(routeStarted && detected!=stations.colors[0] && detected>=0) departedGreen=true;
-  // Sensor also may see an unclassified floor between markers.
-  if(routeStarted && detected<0) departedGreen=true;
-  if((int32_t)(millis()-departHoldUntil)<0) return;
-  if(!sensors.detectsStationMarker())return;
-  // Default route finish: ANY confirmed GREEN after genuine departure.
-  // Do not require RED acknowledgements or completing configured station slots:
-  // a missed workstation must not cause the AGV to drive past its home marker.
-  // The color sensor already requires fresh, repeated full RGBC samples,
-  // and its marker latch requires a confirmed non-marker interval.
-  const bool pastDepartureGuard = routeAuthorizedAtMs != 0 &&
-      uint32_t(millis() - routeAuthorizedAtMs) >= 1800UL;
-  if(detected==stations.colors[0] && routeStarted && departedGreen && pastDepartureGuard) {
-    motors.stop();state=FINISHED;routeStarted=false;
-    logEvent("Confirmed GREEN: journey finished (workstation count not required)"); return;
+  const int homeColor=stations.colors[0];
+  const uint32_t cycle=sensors.getColorCycleId();
+
+  // One complete, valid RGBC frame counts once; repeated loop ticks do not.
+  if(routeStarted && cycle!=lastDepartureColorCycle) {
+    lastDepartureColorCycle=cycle;
+    if(sensors.hasFreshColor() && homeColor>=0 && !departedGreen) {
+      if(detected==homeColor) {
+        homeAwayValidFrames=0;
+      } else if(homeAwayValidFrames<HOME_DEPARTURE_AWAY_FRAMES) {
+        ++homeAwayValidFrames;
+      }
+    }
   }
-  // Physical stations 1..3 are ordered. Repeated marker colors are allowed.
+  // Home is always reusable. New RFID/Web START while on GREEN is allowed.
+  // Arm its finish marker only after confirmed non-home frames and travel time.
+  if(routeStarted && !departedGreen && homeColor>=0 &&
+     homeAwayValidFrames>=HOME_DEPARTURE_AWAY_FRAMES &&
+     uint32_t(now-routeAuthorizedAtMs)>=HOME_DEPARTURE_GUARD_MS) {
+    departedGreen=true;
+    logEvent("HOME departed: return-stop detector armed");
+  }
+  if((int32_t)(now-departHoldUntil)<0) return;
+  if(!sensors.detectsStationMarker()) return;
+
+  // GREEN (or configured home color) ends this lap, but never locks out another.
+  if(homeColor>=0 && detected==homeColor && routeStarted && departedGreen) {
+    motors.stop();
+    state=FINISHED;
+    routeStarted=false;
+    latchedStation=-1;
+    stationWaitStartMs=0;
+    logEvent("HOME confirmed: lap complete; tap RFID or Web START for next lap");
+    return;
+  }
+  // Preserve ordered station slots, RFID, Web and saved auto-continue timer.
   if(nextStationSlot<=3 && stations.colors[nextStationSlot]>=0 &&
-     detected==stations.colors[nextStationSlot] && routeStarted && departedGreen){
-    motors.stop();state=STATION_WAIT;latchedStation=nextStationSlot;
+     detected==stations.colors[nextStationSlot] && routeStarted && departedGreen) {
+    motors.stop();
+    state=STATION_WAIT;
+    latchedStation=nextStationSlot;
     stationWaitStartMs=millis();
-    logEvent("Confirmed workstation color: awaiting RFID/Web acknowledgement");
-    Serial.printf("[STATION] Slot %u: detected color %d; waiting for assigned RFID or web\n",nextStationSlot,detected);
+    logEvent("Confirmed workstation color: RFID, Web or station timer to continue");
+    Serial.printf("[STATION] Slot %u: confirmed color %d; waiting for authorization or timer\n",nextStationSlot,detected);
   }
 }
 
