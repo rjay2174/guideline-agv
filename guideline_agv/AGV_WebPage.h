@@ -4,7 +4,7 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-06-ap-stable-fast-pd">
+  <meta name="agv-ui-version" content="2026-11-06-pot-primary-speed">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
@@ -84,6 +84,10 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
       <select id="irPolarity"><option value="1">LOW = BLACK (default)</option><option value="0">HIGH = BLACK</option></select>
     </label>
     <button id="saveIRPolarity">Save IR Polarity</button> <span id="irPolarityMsg" style="color:#9db0c7"></span>
+    <h3>Physical Speed Knob (GPIO3)</h3>
+    <p>The physical 10 kOhm potentiometer controls speed without a phone. Turn to zero to stop wheel PWM. Automatic steering correction, bridge and recovery speeds scale with it.</p>
+    <div class="stat-box"><div class="stat-title">Potentiometer speed (0-4095 ADC)</div><strong id="potLive">Waiting for sensor...</strong></div>
+    <p style="color:#9db0c7">Very low PWM may not overcome motor friction. Load Test speed percentage can only reduce the knob's maximum.</p>
     <h3>Safety Settings</h3>
     <label>Obstacle Stop Distance (cm): <input id="safetyDist" type="number" min="5" max="80" value="20"></label>
     <button id="saveSafety">Save Safety Distance</button>
@@ -421,6 +425,7 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
       $('station').textContent=d.station;
       $('uiDistance').textContent=d.distCm>0?d.distCm+' cm':'Clear';
       $('uiSpeed').textContent=d.speed+'%';
+      if($('potLive')) $('potLive').textContent='ADC '+d.potRaw+'/4095 | POT '+d.potPwm+'/255 | Effective '+d.maxPwm+'/255';
       $('event').textContent=d.event;
       const safety=$('irAllBlackSafety');
       if(d.irAllBlackLatched){
