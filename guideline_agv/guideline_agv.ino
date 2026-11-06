@@ -160,9 +160,11 @@ void configureLineLossRecoverySpeed() {
   // PWM-based travel approximation. Keep roughly constant bridge distance
   // across POT settings; actual distance must be checked on the floor.
   const int cap=motors.maxSpeed;
-  bridgePWMAtLineLoss = (cap>0) ? min(cap, max(1,int(lroundf(float(cap)*45.0f/255.0f)))) : 0;
+  // Faster but bounded straight bridge: 90/255 of selected ceiling instead
+  // of 45/255. Still slower than normal track following for safety.
+  bridgePWMAtLineLoss = (cap>0) ? min(cap, max(1,int(lroundf(float(cap)*90.0f/255.0f)))) : 0;
   dynamicBridgeMs = bridgePWMAtLineLoss>0 ?
-      uint32_t(constrain(lroundf(2000.0f*45.0f/float(bridgePWMAtLineLoss)), 600L, 4000L)) : 2000UL;
+      uint32_t(constrain(lroundf(2000.0f*45.0f/float(bridgePWMAtLineLoss)), 500L, 4000L)) : 2000UL;
   const int searchPWM=(cap>0)?min(cap,max(1,cap/2)):0;
   const uint32_t searchMs=searchPWM>0 ?
       uint32_t(constrain(lroundf(5000.0f*90.0f/float(searchPWM)), 2500L, 7000L)) : 5000UL;
@@ -176,6 +178,7 @@ uint32_t obstacleHoldStartedAt = 0;
 uint32_t lineLostAt = 0;
 float lastKnownLineError = 0.0f;
 uint32_t departHoldUntil = 0;
+uint32_t routeAuthorizedAtMs = 0; // Initial start marker cannot instantly finish a lap.
 bool routeStarted = false;
 bool departedGreen = false;
 bool visitedRedStation = false;
@@ -291,6 +294,7 @@ void requestSafeStop() {
   latchedStation = -1;
   // An explicit STOP / RESET cancels the route and requires a new START.
   routeStarted = false;
+  routeAuthorizedAtMs = 0;
   departedGreen = false;
   visitedRedStation = false;
   lastStationWasRed = false;
@@ -323,6 +327,7 @@ bool requestAutonomousStart(bool resetFault) {
   // Starting a new journey resets route progress, while station ACK keeps it.
   if (state == IDLE || state == FINISHED) {
     routeStarted = true;
+    routeAuthorizedAtMs = millis();
     departedGreen = false;
     visitedRedStation = false;
     lastStationWasRed = false;nextStationSlot=1;
@@ -448,16 +453,16 @@ void handleStationDetection() {
   if(routeStarted && detected<0) departedGreen=true;
   if((int32_t)(millis()-departHoldUntil)<0) return;
   if(!sensors.detectsStationMarker())return;
-  // Never accept GREEN as a return marker while a configured workstation
-  // is still pending; ordinary floor can briefly resemble green under light.
-  bool workstationsComplete = true;
-  for (uint8_t slot = nextStationSlot; slot <= 3; ++slot) {
-    if (stations.colors[slot] >= 0) { workstationsComplete = false; break; }
-  }
-  if(detected==stations.colors[0] && routeStarted && departedGreen &&
-     visitedRedStation && workstationsComplete) {
+  // Default route finish: ANY confirmed GREEN after genuine departure.
+  // Do not require RED acknowledgements or completing configured station slots:
+  // a missed workstation must not cause the AGV to drive past its home marker.
+  // The color sensor already requires fresh, repeated full RGBC samples,
+  // and its marker latch requires a confirmed non-marker interval.
+  const bool pastDepartureGuard = routeAuthorizedAtMs != 0 &&
+      uint32_t(millis() - routeAuthorizedAtMs) >= 1800UL;
+  if(detected==stations.colors[0] && routeStarted && departedGreen && pastDepartureGuard) {
     motors.stop();state=FINISHED;routeStarted=false;
-    logEvent("Confirmed GREEN return marker: all configured stations complete"); return;
+    logEvent("Confirmed GREEN: journey finished (workstation count not required)"); return;
   }
   // Physical stations 1..3 are ordered. Repeated marker colors are allowed.
   if(nextStationSlot<=3 && stations.colors[nextStationSlot]>=0 &&
@@ -637,10 +642,11 @@ void handleAutonomousFollow() {
     previousSampleMs = now;
   }
 
-  // A centered line is full-speed; wide/symmetric markers are treated more
-  // cautiously to avoid racing across intersections or dark floor patches.
+  // All centered patterns use the physical knob's full requested PWM.
+  // Only ambiguous off-center symmetric IR patterns retain the 170 cap;
+  // all-five-black lift safety remains unchanged and cannot be bypassed.
   if (fabsf(err) < 0.16f) {
-    const int pwm = (mask == 0x04u || centerPriority) ? requested : min(requested, 170);
+    const int pwm = (mask & 0x04u) ? requested : min(requested, 170);
     motors.drive(pwm, pwm);
     return;
   }
