@@ -58,6 +58,29 @@ private:
   uint32_t lastAPCheckMs = 0;
   uint32_t lastRouterStatusMs = 0;
   uint8_t routerAttempts = 0;
+  bool routerConnectPending = false;
+  uint32_t routerConnectStartedMs = 0;
+  String routerConnectError;
+
+  bool routerHasAddress() const {
+    return WiFi.status() == WL_CONNECTED &&
+      WiFi.SSID() == routerName && (uint32_t)WiFi.localIP() != 0;
+  }
+
+  void updateRouterJoinResult() {
+    if (!routerConnectPending) return;
+    if (routerHasAddress()) {
+      routerConnectPending = false;
+      routerConnectError = "";
+      Serial.printf("[WIFI] Router connected successfully | IP=%s | SSID=%s\n",
+        WiFi.localIP().toString().c_str(), routerName.c_str());
+    } else if (uint32_t(millis()-routerConnectStartedMs) >= 20000) {
+      routerConnectPending = false;
+      routerConnectError = String("Router not connected within 20 s (") +
+        wifiStatusText(WiFi.status()) + "). Check 2.4 GHz SSID/password and router signal.";
+      Serial.printf("[WIFI] %s\n", routerConnectError.c_str());
+    }
+  }
 
   // Only A (fresh finger press) can arm this connection. WebSocket reconnection
   // by itself must never restart a stopped wheel. S releases immediately.
@@ -169,6 +192,9 @@ private:
       return;
     }
     lastRouterRetryMs=millis();
+    routerConnectStartedMs = lastRouterRetryMs;
+    routerConnectPending = true;
+    routerConnectError = "";
     ++routerAttempts;
     Serial.printf("[WIFI] %s router %s (attempt %u; AP stays enabled)\n",
                   reconnect?"Retrying":"Connecting to",routerName.c_str(),unsigned(routerAttempts));
@@ -427,7 +453,8 @@ public:
         x.replace("\n", " ");x.replace("\r", " ");
         return x;
       };
-      bool linked = WiFi.status() == WL_CONNECTED;
+      updateRouterJoinResult();
+      bool linked = routerHasAddress();
       String configured = wifiPrefsOK ? wifiPrefs.getString("ssid", DEFAULT_STA_SSID) : String(DEFAULT_STA_SSID);
       String j = "{\"connected\":" + String(linked ? "true" : "false");
       j += ",\"ssid\":\"" + escapeJson(linked ? WiFi.SSID() : configured) + "\"";
@@ -438,6 +465,13 @@ public:
       j += ",\"apSsid\":\"" + escapeJson(WiFi.softAPSSID()) + "\"";
       j += ",\"apIp\":\"" + WiFi.softAPIP().toString() + "\"";
       j += ",\"wifiStatus\":" + String(int(WiFi.status()));
+      const char* phase = linked ? "connected" :
+        (routerConnectPending ? "connecting" :
+          (routerConnectError.length() ? "failed" : "disconnected"));
+      j += ",\"routerPhase\":\"" + String(phase) + "\"";
+      j += ",\"routerMessage\":\"" + escapeJson(routerConnectError) + "\"";
+      j += ",\"routerAttempt\":" + String(routerAttempts);
+      j += ",\"routerElapsedMs\":" + String(routerConnectPending ? uint32_t(millis()-routerConnectStartedMs) : 0);
       j += ",\"wifiStatusText\":\"" + String(wifiStatusText(WiFi.status())) + "\"}";
       server.sendHeader("Cache-Control", "no-store");
       server.send(200, "application/json", j);
@@ -453,7 +487,8 @@ public:
       }
       routerName=ssid;routerKey=pass;
       connectRouter();
-      server.send(200,"text/plain","Router credentials saved; connecting while AP remains active");
+      server.sendHeader("Cache-Control", "no-store");
+      server.send(202,"text/plain","Router connection requested. Check /wifi/status for the assigned IP.");
     });
     // Straight-line load test. Only authorized Web START runs it; no RFID required.
     server.on("/loadtest/start",HTTP_POST,[this](){
@@ -625,6 +660,7 @@ public:
 
   void update() {
     // Non-blocking AP/STA health manager: no waits that pause navigation or RFID.
+    updateRouterJoinResult();
     bool linked=WiFi.status()==WL_CONNECTED;
     if(linked!=previousRouterConnected) {
       previousRouterConnected=linked;
@@ -635,7 +671,7 @@ public:
       } else Serial.printf("[WIFI] ROUTER DISCONNECTED | reason/status=%s (%d) | captive AP retained\n",
          wifiStatusText(WiFi.status()),int(WiFi.status()));
     }
-    if(!linked && uint32_t(millis()-lastRouterRetryMs)>=30000) {
+    if(!linked && !routerConnectPending && uint32_t(millis()-lastRouterRetryMs)>=30000) {
       // Avoid disrupting captive-portal clients with channel hopping.
       if(WiFi.softAPgetStationNum()==0) connectRouter(true);
       else lastRouterRetryMs=millis();
