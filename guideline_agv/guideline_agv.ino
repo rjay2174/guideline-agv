@@ -484,22 +484,46 @@ void handleAutonomousFollow() {
   }
   if (lineLostAt) logEvent("Guide line reacquired");
   lineLostAt = 0;
-  const float err = sensors.getLineError();
+  const float err = sensors.getLineError(); // IR1..IR5 weights: -2,-1,0,+1,+2
   lastKnownLineError = err;
   const uint8_t mask = sensors.getIRBits();
   const int requested = motors.maxSpeed;
-  // v1.9.19 known-working black-dominance behavior: centered/symmetric
-  // patterns go straight. Limit speed across wide black intersections.
+
+  // Fast forward-only PD steering for the installed DIGITAL 5-channel array.
+  // IR2/IR4 (|error|=1) now produce substantial correction, BEFORE IR1/IR5.
+  // Differentiate at ~25ms to avoid amplifying digital threshold noise.
+  static float previousError = 0.0f;
+  static float filteredRate = 0.0f;
+  static uint32_t previousSampleMs = 0;
+  const uint32_t now = millis();
+  if (previousSampleMs == 0 || uint32_t(now - previousSampleMs) >= 25) {
+    if (previousSampleMs != 0 && uint32_t(now - previousSampleMs) <= 250) {
+      const float dt = float(now - previousSampleMs) * 0.001f;
+      const float rate = constrain((err - previousError) / dt, -50.0f, 50.0f);
+      filteredRate = 0.65f * filteredRate + 0.35f * rate;
+    } else filteredRate = 0.0f;
+    previousError = err;
+    previousSampleMs = now;
+  }
+
+  // Full straight-line PWM on centered track. Treat wide symmetric strips
+  // cautiously; these can be junctions, markers, or dark floor regions.
   if (fabsf(err) < 0.16f) {
-    const int pwm = (mask == 0x04u) ? requested : min(requested, 120);
+    const int pwm = (mask == 0x04u) ? requested : min(requested, 170);
     motors.drive(pwm, pwm);
     return;
   }
-  const float severity = constrain(fabsf(err) / 2.0f, 0.0f, 1.0f);
-  const int outer = constrain(int(lroundf(requested * (1.0f - 0.12f * severity))), 0, 255);
-  const float reduction = constrain(0.40f * motors.steeringGain * fabsf(err), 0.0f, 0.72f);
-  int inner = constrain(int(lroundf(outer * (1.0f - reduction))), 0, outer);
-  if (inner > 0 && inner < 22 && outer >= 22) inner = 22;
+
+  // Keep OUTER wheel at the requested PWM; slow only INSIDE wheel.
+  // Gains are initial bench-tuning defaults, not validated coefficients.
+  const float gainFactor = constrain(motors.steeringGain / 1.20f, 0.60f, 1.50f);
+  const float kp = 95.0f * gainFactor;
+  const float kd = 0.30f * gainFactor;
+  const int outer = requested;
+  const int correction = constrain(int(lroundf(kp * fabsf(err) +
+      kd * (err < 0 ? -filteredRate : filteredRate))),
+      0, int(lroundf(float(outer) * 0.78f)));
+  const int inner = max(0, outer - correction);
   if (err < 0) motors.drive(inner, outer);
   else         motors.drive(outer, inner);
 }
