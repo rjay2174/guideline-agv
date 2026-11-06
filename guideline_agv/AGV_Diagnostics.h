@@ -147,11 +147,12 @@ public:
     }
 
     extern uint16_t speedPotRaw;
+    extern int speedPotRawPwm;
     extern int speedPotPwm;
     const int pot=int(speedPotRaw);
     if (first || (now-lastPotLog>=300 && abs(pot-lastPot)>=205)) {
-      Serial.printf("[%lu][POT] GPIO%u raw=%d/4095 | potPWM=%d/255 | effectiveMaxPWM=%d/255\n",
-        (unsigned long)now,speedPotPin,pot,speedPotPwm,motors.maxSpeed);
+      Serial.printf("[%lu][POT] GPIO%u raw=%d/4095 | rawPWM=%d | calPWM=%d | effectiveMaxPWM=%d/255\n",
+        (unsigned long)now,speedPotPin,pot,speedPotRawPwm,speedPotPwm,motors.maxSpeed);
       lastPot=pot;lastPotLog=now;
     }
 
