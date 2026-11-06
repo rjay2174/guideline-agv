@@ -34,6 +34,8 @@ private:
   uint32_t noCardTimeouts = 0;
   uint32_t diagnosticUntilMs = 0;
   bool diagnosticScanEnabled = false;
+  bool requireCardRemoval = false;
+  uint32_t cardAbsentSinceMs = 0;
 
 
 public:
@@ -118,6 +120,13 @@ public:
     diagnosticScanEnabled=false;
     lastCardUID="";
   }
+  // Requiring card removal at each station prevents an old held RFID tap
+  // from being reused after arrival; timed and Web starts still work.
+  void requireFreshTap() {
+    lastCardUID="";
+    requireCardRemoval=true;
+    cardAbsentSinceMs=0;
+  }
   void reinitialize() {
     if (!pReader) return;
     cancelDiagnostic();
@@ -175,8 +184,27 @@ public:
     byte atqa[2], size = sizeof(atqa);
     MFRC522::StatusCode wake = pReader->PICC_WakeupA(atqa, &size);
     if (wake != MFRC522::STATUS_OK) {
-      if (wake == MFRC522::STATUS_TIMEOUT) noCardTimeouts++;
-      else wakeupFailures++;
+      if (wake == MFRC522::STATUS_TIMEOUT) {
+        noCardTimeouts++;
+        if (requireCardRemoval) {
+          if (!cardAbsentSinceMs) cardAbsentSinceMs=millis();
+          else if (uint32_t(millis()-cardAbsentSinceMs)>=350UL) {
+            requireCardRemoval=false;
+            lastDeliveredUID="";
+            lastSeenUID="";
+            lastSeenMs=0;
+          }
+        }
+      } else {
+        wakeupFailures++;
+        cardAbsentSinceMs=0;
+      }
+      return;
+    }
+    cardAbsentSinceMs=0;
+    if (requireCardRemoval) {
+      pReader->PICC_HaltA();
+      pReader->PCD_StopCrypto1();
       return;
     }
     MFRC522::StatusCode sel = pReader->PICC_Select(&pReader->uid);
