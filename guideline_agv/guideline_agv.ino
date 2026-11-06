@@ -373,6 +373,13 @@ void handleStationTimeout(){
   if(requestAutonomousStart(true))logEvent("Station timer expired: bounded departure authorized");
 }
 
+// A junction can put black under S1/S5 while the intended guide remains
+// under S3. Give the center sensor priority over either outer branch.
+// 11111 is intentionally excluded: the existing all-black safety remains active.
+static inline bool hasCenterWithOuterBranch(uint8_t irMask) {
+  return (irMask & 0x04u) != 0 && (irMask & 0x11u) != 0 && irMask != 0x1Fu;
+}
+
 void handleLoadTestRun(){
   // The end-of-line obstacle is the STOP signal. NEVER auto-resume the test.
   if(!loadTest.active){motors.stop();state=IDLE;return;}
@@ -389,9 +396,16 @@ void handleLoadTestRun(){
     motors.stop();loadTest.finish("LINE LOST");motors.maxSpeed=loadTest.savedSpeed;state=FAULT_STOP;
     logEvent("Load test stopped: line lost");return;
   }
-  // Reuse proven black-dominance steering; no station auto-stop during test.
-  const float err=sensors.getLineError();
+  // When S3 and S1/S5 both detect a black line, ignore the outer branch.
+  // The line-test path follows the center sensor rather than turning away.
+  const uint8_t irMask=sensors.getIRBits();
   const int requested=motors.maxSpeed;
+  if (hasCenterWithOuterBranch(irMask)) {
+    motors.drive(requested,requested);
+    return;
+  }
+  // Otherwise retain existing line-test steering behavior.
+  const float err=sensors.getLineError();
   if(fabsf(err)<0.16f){motors.drive(requested,requested);return;}
   const float severity=constrain(fabsf(err)/2.0f,0.0f,1.0f);
   int outer=constrain(int(lroundf(requested*(1.0f-0.12f*severity))),0,255);
@@ -484,9 +498,12 @@ void handleAutonomousFollow() {
   }
   if (lineLostAt) logEvent("Guide line reacquired");
   lineLostAt = 0;
-  const float err = sensors.getLineError(); // IR1..IR5 weights: -2,-1,0,+1,+2
-  lastKnownLineError = err;
   const uint8_t mask = sensors.getIRBits();
+  const bool centerPriority = hasCenterWithOuterBranch(mask);
+  // S3 + S1 (00101), S3 + S5 (10100) and related split patterns
+  // are treated as centered. Do not average the outer branch into steering.
+  const float err = centerPriority ? 0.0f : sensors.getLineError();
+  lastKnownLineError = err;
   const int requested = motors.maxSpeed;
 
   // Fast forward-only PD steering for the installed DIGITAL 5-channel array.
@@ -509,7 +526,7 @@ void handleAutonomousFollow() {
   // Full straight-line PWM on centered track. Treat wide symmetric strips
   // cautiously; these can be junctions, markers, or dark floor regions.
   if (fabsf(err) < 0.16f) {
-    const int pwm = (mask == 0x04u) ? requested : min(requested, 170);
+    const int pwm = (mask == 0x04u || centerPriority) ? requested : min(requested, 170);
     motors.drive(pwm, pwm);
     return;
   }
