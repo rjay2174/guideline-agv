@@ -4,7 +4,7 @@ static const char PAGE[] PROGMEM = R"AGVHTML(<!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="agv-ui-version" content="2026-11-05-websocket-remote">
+  <meta name="agv-ui-version" content="2026-11-06-ap-stable-fast-pd">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>GUIDELine AGV Terminal</title>
   <style>
