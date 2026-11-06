@@ -146,10 +146,12 @@ public:
       cardShown=false;
     }
 
-    const int pot=analogRead(speedPotPin);
+    extern uint16_t speedPotRaw;
+    extern int speedPotPwm;
+    const int pot=int(speedPotRaw);
     if (first || (now-lastPotLog>=300 && abs(pot-lastPot)>=205)) {
-      Serial.printf("[%lu][POT] GPIO%u raw=%d/4095 (~%d%%) [monitor only]\n",
-        (unsigned long)now,speedPotPin,pot,(pot*100+2047)/4095);
+      Serial.printf("[%lu][POT] GPIO%u raw=%d/4095 | potPWM=%d/255 | effectiveMaxPWM=%d/255\n",
+        (unsigned long)now,speedPotPin,pot,speedPotPwm,motors.maxSpeed);
       lastPot=pot;lastPotLog=now;
     }
 
