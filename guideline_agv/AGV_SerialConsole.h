@@ -51,7 +51,7 @@ class AGVSerialConsole {
       Serial.println("[SERVICE] STATION LIST | STATION <0..3> <GREEN|RED|BLUE|YELLOW|OFF> <SECONDS>");
       Serial.println("[SERVICE] AUTO ON|OFF | KEY <UID> <MASK 0..15> | MASTER <NEW UID> (scan old master first)");
       Serial.println("[SERVICE] MOTOR ARM | FORWARD <PWM> | LEFT <PWM> | RIGHT <PWM> | MOTOR L|R <PWM> | STOP");
-      Serial.println("[SERVICE] RGB TEST | WIFI STATUS | WIFI DEFAULTS | WIFI RETRY | BLE STATUS | LOG ON|OFF");return;
+      Serial.println("[SERVICE] RGB TEST | WIFI STATUS | WIFI DEFAULTS | WIFI AP DEFAULTS | WIFI RETRY | BLE STATUS | LOG ON|OFF");return;
     }
     if(cmd=="RFID TEST"){
       if(!stationary()){Serial.println("[RFID] Stop AGV before diagnostic scan");return;}
@@ -88,6 +88,15 @@ class AGVSerialConsole {
       bool okPass=!hadPass||p.remove("pass");
       bool ok=okSsid&&okPass;p.end();
       Serial.printf("[WIFI] Router overrides cleared: %s. REBOOT ESP32 to use compiled default router credentials.\n",ok?"YES":"PARTIAL/NOT PRESENT");return;
+    }
+    if(cmd=="WIFI AP DEFAULTS") {
+      if(!stationary()){Serial.println("[WIFI] Stop the AGV first");return;}
+      Preferences p;
+      if(!p.begin("agv-network",false)){Serial.println("[WIFI] NVS inaccessible");return;}
+      bool a=!p.isKey("apSsid")||p.remove("apSsid");
+      bool b=!p.isKey("apPass")||p.remove("apPass");
+      p.end();
+      Serial.printf("[WIFI] Restore factory AP SSID/pass: %s. Reboot required.\n",a&&b?"OK":"FAILED");return;
     }
     if(cmd=="WIFI RETRY") {
       if(!stationary()) {Serial.println("[WIFI] Stop AGV before manual reconnect");return;}
