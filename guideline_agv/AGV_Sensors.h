@@ -46,7 +46,7 @@ private:
   int safetyCm = 20;
 
   Reading calPresets[2][4];
-  Reading factoryPresets[4];
+  Reading factoryPresets[2][4];
   Reading floorRefs[2] = {{NAN,NAN,NAN,NAN},{NAN,NAN,NAN,NAN}};
   bool floorValid[2]={false,false};
   bool calibrated[2][4] = {};
@@ -55,7 +55,7 @@ private:
   Preferences irPrefs;
   uint8_t irRawBits = 0;
   uint32_t colorCycleId = 0, lastStationCountCycle = 0;
-  float tolerances[2] = {0.085f, 0.115f};
+  float tolerances[2] = {0.050f, 0.045f};
   // mode: 0=indoor, 1=outdoor, 2=automatic (best passing profile).
   uint8_t colorMode = 2;
   int matchedProfile = -1;
@@ -120,7 +120,9 @@ private:
     }
     colorMatchDistance=(best<999)?best:NAN;
     // Similar distances to different color classes are ambiguous, not station markers.
-    if(winner>=0 && nextOtherColor-best < 0.015f) winner=-1;
+    // A second color nearly as plausible is ambiguous, especially outdoor
+    // RED versus YELLOW. Reject rather than stop on a false station marker.
+    if(winner>=0 && nextOtherColor-best < 0.020f) winner=-1;
     currentStationIdx=winner;
   }
   void processCapture() {
@@ -154,6 +156,9 @@ private:
   int currentStationIdx = -1;
   int stableHits = 0;
   int previousStationCandidate = -1;
+  uint32_t candidateSinceMs = 0;
+  uint8_t awayFrames = 0;
+  int lastConfirmedColor = -1;
   bool sawAway = true;
 
   uint8_t irBlackBits = 0;
@@ -194,11 +199,14 @@ public:
     attachInterrupt(digitalPinToInterrupt(cout), colorISR, RISING);
   }
 
-  void loadColorPresets(Reading g, Reading r, Reading b, Reading y) {
-    Reading defaults[4]={g,r,b,y};
-    for(int i=0;i<4;i++) factoryPresets[i]=defaults[i];
+  void loadColorPresets(const Reading (&indoor)[4], const Reading (&outdoor)[4]) {
+    for(int i=0;i<4;i++) {
+      factoryPresets[0][i]=indoor[i];
+      factoryPresets[1][i]=outdoor[i];
+    }
+    // These are defaults ONLY. NVS-saved calibration takes precedence on boot.
     for(int p=0;p<2;p++) for(int i=0;i<4;i++) {
-      calPresets[p][i]=defaults[i]; calibrated[p][i]=(p==0);
+      calPresets[p][i]=factoryPresets[p][i]; calibrated[p][i]=true;
     }
     prefsOpen=prefs.begin("agv-colors",false);
     if(!prefsOpen) { Serial.println("[COLOR CAL] NVS unavailable; defaults only"); return; }
@@ -223,6 +231,25 @@ public:
       for(int p=0;p<2;p++)if(floorValid[p]&&!validReading(floorRefs[p]))floorValid[p]=false;
     }
   }
+  bool applyMeasuredColorReferences() {
+    // Explicit operator action, when stationary. Preserve floor references.
+    if(!prefsOpen || capture.active) return false;
+    for(int p=0;p<2;p++) for(int i=0;i<4;i++) {
+      if(!validReading(factoryPresets[p][i])) return false;
+    }
+    for(int p=0;p<2;p++) for(int i=0;i<4;i++) {
+      calPresets[p][i]=factoryPresets[p][i];
+      calibrated[p][i]=true;
+    }
+    tolerances[0]=0.050f;
+    tolerances[1]=0.045f;
+    colorMode=2; // Evaluate both profiles; do not average their raw frequencies.
+    saveCalibration();
+    clearStationLatch();
+    classifyColor();
+    captureMessage="Measured indoor/outdoor references saved to NVS";
+    return true;
+  }
   bool startCapture(int profile,int color) {
     if(profile<0||profile>1||color<0||color>4||capture.active) return false;
     capture=CaptureJob{}; capture.active=true;capture.profile=profile;
@@ -244,13 +271,11 @@ public:
     if(prefsOpen) {prefs.remove("cal");prefs.remove("valid");prefs.remove("tol");prefs.remove("mode");prefs.remove("floor");prefs.remove("floorV");}
     // Do not delete unrelated NVS settings.
     capture.active=false; floorValid[0]=floorValid[1]=false;
-    for(int i=0;i<4;i++) {
-      calPresets[0][i]=factoryPresets[i];
-      calibrated[0][i]=true;
-      calPresets[1][i]=factoryPresets[i];
-      calibrated[1][i]=false;
+    for(int p=0;p<2;p++) for(int i=0;i<4;i++) {
+      calPresets[p][i]=factoryPresets[p][i];
+      calibrated[p][i]=true;
     }
-    tolerances[0]=0.085f;tolerances[1]=0.115f;colorMode=2;
+    tolerances[0]=0.050f;tolerances[1]=0.045f;colorMode=2;
     captureMessage="Saved calibration cleared; indoor defaults restored";
     classifyColor();
   }
@@ -387,16 +412,35 @@ public:
     // must restart the 3-frame counter rather than inheriting a prior color.
     if (lastStationCountCycle == colorCycleId) return false;
     lastStationCountCycle = colorCycleId;
+    const uint32_t now = millis();
     if (currentStationIdx != previousStationCandidate) {
       previousStationCandidate = currentStationIdx;
       stableHits = 0;
+      candidateSinceMs = now;
     }
-    if (currentStationIdx < 0) { sawAway = true; return false; }
-    if (!sawAway) return false;
-    if (++stableHits < 3) return false;
+    if (currentStationIdx < 0) {
+      if (awayFrames < 3) ++awayFrames;
+      if (awayFrames >= 2) { sawAway = true; lastConfirmedColor = -1; }
+      return false;
+    }
+    awayFrames = 0;
+    if (!sawAway || !colorFresh) return false;
+    // GREEN returns at speed: two strong full RGBC frames can confirm it.
+    // All other colors require three consistent frames (approx. 120 ms).
+    // Ambiguous, distant GREEN-like floor readings are not confirmed.
+    const bool strongGreen = currentStationIdx == 0 &&
+      isfinite(colorMatchDistance) && colorMatchDistance < 0.040f;
+    const uint8_t required = strongGreen ? 2 : 3;
+    if (++stableHits < required || (now-candidateSinceMs) < 35) return false;
     sawAway = false; stableHits = 0;
+    lastConfirmedColor = currentStationIdx;
     return true;
   }
-
-  void clearStationLatch() { sawAway = false; stableHits = 0; }
+  int getLastConfirmedColor() const { return lastConfirmedColor; }
+  uint8_t getStationCandidateHits() const { return uint8_t(stableHits); }
+  void clearStationLatch() {
+    sawAway = false; stableHits = 0; awayFrames = 0;
+    previousStationCandidate = -1; candidateSinceMs = 0;
+    lastConfirmedColor = -1;
+  }
 };
