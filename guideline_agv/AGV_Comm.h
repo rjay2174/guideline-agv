@@ -40,6 +40,7 @@ extern int speedPotRawPwm;
 extern uint16_t speedPotFiltered;
 extern int speedPotPwm;
 extern int loadTestPwmCeiling;
+extern char lastNavigationEvent[120];
 extern void updatePhysicalSpeedPot(bool force);
 
 class AGVComm {
@@ -56,6 +57,11 @@ private:
   bool wifiPrefsOK=false;
   String apName;
   String apKey;
+  const char* defaultApName = "GUIDELine-AGV";
+  const char* defaultApKey = "";
+  uint32_t apRestartDueMs = 0;
+  bool wifiScanBusy = false;
+  uint32_t wifiScanStartedMs = 0;
   String routerName;
   String routerKey;
   bool previousRouterConnected = false;
@@ -248,8 +254,14 @@ public:
 
     // 2. Start captive AP FIRST and preserve it independently of router status.
     wifiPrefsOK=wifiPrefs.begin("agv-network",false);
-    apName=apSsid;
-    apKey=apPass;
+    defaultApName=apSsid;
+    defaultApKey=apPass;
+    apName=wifiPrefsOK?wifiPrefs.getString("apSsid",apSsid):String(apSsid);
+    apKey=wifiPrefsOK?wifiPrefs.getString("apPass",apPass):String(apPass);
+    if(apName.length()<1 || apName.length()>32 || apKey.length()<8 || apKey.length()>63) {
+      apName=apSsid;apKey=apPass;
+      Serial.println("[PORTAL] Invalid saved AP settings; factory AP credentials restored in memory");
+    }
     routerName=wifiPrefsOK?wifiPrefs.getString("ssid",DEFAULT_STA_SSID):String(DEFAULT_STA_SSID);
     routerKey=wifiPrefsOK?wifiPrefs.getString("pass",DEFAULT_STA_PASS):String(DEFAULT_STA_PASS);
     routerName.trim();
@@ -349,6 +361,16 @@ public:
         server.send(400,"text/plain","Invalid color settings");return;
       }
       server.send(200,"text/plain","Calibration settings saved to NVS");
+    });
+    server.on("/color/apply-measured",HTTP_POST,[this]() {
+      if((state!=IDLE && state!=FINISHED && state!=FAULT_STOP) ||
+         motors.getAppliedL()!=0 || motors.getAppliedR()!=0 || sensors.captureBusy()) {
+        server.send(409,"text/plain","STOP/RESET and wait for motors to stop before applying references");return;
+      }
+      if(!sensors.applyMeasuredColorReferences()) {
+        server.send(500,"text/plain","Unable to save measured color references to NVS");return;
+      }
+      server.send(200,"text/plain","Saved measured indoor and outdoor GREEN/RED/BLUE/YELLOW references to NVS; floor calibrations preserved");
     });
     server.on("/color/reset",HTTP_POST,[this]() {
       if(state!=IDLE && state!=FINISHED && state!=FAULT_STOP) {
@@ -468,6 +490,7 @@ public:
       j += ",\"hostname\":\"" + escapeJson(String(DEVICE_HOSTNAME)) + "\"";
       j += ",\"apActive\":" + String(WiFi.softAPSSID().length() ? "true" : "false");
       j += ",\"apSsid\":\"" + escapeJson(WiFi.softAPSSID()) + "\"";
+      j += ",\"apPending\":\"" + escapeJson(apName) + "\"";
       j += ",\"apIp\":\"" + WiFi.softAPIP().toString() + "\"";
       j += ",\"wifiStatus\":" + String(int(WiFi.status()));
       const char* phase = linked ? "connected" :
@@ -494,6 +517,81 @@ public:
       connectRouter();
       server.sendHeader("Cache-Control", "no-store");
       server.send(202,"text/plain","Router connection requested. Check /wifi/status for the assigned IP.");
+    });
+    // AP settings are saved to NVS; apply only on a deliberate reboot.
+    // No password is ever returned in JSON or printed to serial logs.
+    server.on("/wifi/ap",HTTP_POST,[this](){
+      if(state!=IDLE || loadTest.active || motors.getAppliedL()!=0 || motors.getAppliedR()!=0){
+        server.send(409,"text/plain","STOP/RESET before changing AP settings"); return;
+      }
+      if(!wifiPrefsOK){server.send(500,"text/plain","NVS unavailable");return;}
+      String ssid=server.arg("ssid");ssid.trim();
+      String pass=server.arg("pass");
+      if(ssid.length()<1 || ssid.length()>32 || pass.length()<8 || pass.length()>63){
+        server.send(400,"text/plain","AP SSID: 1-32 characters; password: 8-63 characters");return;
+      }
+      if(wifiPrefs.putString("apSsid",ssid)!=ssid.length() ||
+         wifiPrefs.putString("apPass",pass)!=pass.length()){
+        server.send(500,"text/plain","Could not save AP credentials to NVS");return;
+      }
+      apName=ssid;apKey=pass;
+      server.send(200,"text/plain","AP name and password saved in NVS. Restart AGV to apply. Reconnect with the new credentials at 192.168.4.1.");
+    });
+    server.on("/wifi/ap/defaults",HTTP_POST,[this](){
+      if(state!=IDLE || loadTest.active){server.send(409,"text/plain","STOP/RESET first");return;}
+      if(!wifiPrefsOK){server.send(500,"text/plain","NVS unavailable");return;}
+      bool okName=!wifiPrefs.isKey("apSsid") || wifiPrefs.remove("apSsid");
+      bool okPass=!wifiPrefs.isKey("apPass") || wifiPrefs.remove("apPass");
+      bool ok=okName && okPass;
+      if(!ok){server.send(500,"text/plain","Could not reset AP settings");return;}
+      apName=defaultApName;apKey=defaultApKey;
+      server.send(200,"text/plain","Factory AP credentials restored in NVS. Restart AGV to apply.");
+    });
+    server.on("/wifi/ap/restart",HTTP_POST,[this](){
+      if(state!=IDLE || loadTest.active || motors.getAppliedL()!=0 || motors.getAppliedR()!=0){
+        server.send(409,"text/plain","STOP/RESET before restarting Wi-Fi");return;
+      }
+      motors.stop();
+      apRestartDueMs=millis()+1300;
+      server.send(200,"text/plain","AGV reboot scheduled; connect to the saved AP name after restart.");
+    });
+    // Async scan only while IDLE; scans may briefly disrupt the AP link.
+    server.on("/wifi/scan/start",HTTP_POST,[this](){
+      if(state!=IDLE || loadTest.active || routerConnectPending ||
+         motors.getAppliedL()!=0 || motors.getAppliedR()!=0){
+        server.send(409,"text/plain","STOP/RESET and finish router connection before scanning");return;
+      }
+      if(wifiScanBusy){server.send(202,"text/plain","Scan already in progress");return;}
+      WiFi.scanDelete();
+      int16_t started=WiFi.scanNetworks(true, false); // async; visible SSIDs only
+      if(started == WIFI_SCAN_FAILED){server.send(503,"text/plain","Wi-Fi scan failed; retry while stopped");return;}
+      wifiScanBusy=true;wifiScanStartedMs=millis();
+      server.send(202,"text/plain","Scanning nearby 2.4 GHz Wi-Fi networks");
+    });
+    server.on("/wifi/scan/results",HTTP_GET,[this](){
+      server.sendHeader("Cache-Control","no-store");
+      int16_t count=WiFi.scanComplete();
+      if(wifiScanBusy && count==WIFI_SCAN_RUNNING && uint32_t(millis()-wifiScanStartedMs)<15000){
+        server.send(200,"application/json","{\"state\":\"scanning\",\"networks\":[]}");return;
+      }
+      if(wifiScanBusy && count>=0){
+        auto escapeJson=[](String x)->String {x.replace("\\","\\\\");x.replace("\"","\\\"");return x;};
+        String response="{\"state\":\"done\",\"networks\":[";
+        int emitted=0;
+        for(int i=0; i<count && emitted<25; ++i){
+          String ssid=WiFi.SSID(i);
+          if(ssid.isEmpty())continue;
+          if(emitted++)response+=",";
+          response+="{\"ssid\":\""+escapeJson(ssid)+"\",\"rssi\":"+String(WiFi.RSSI(i))+
+                    ",\"channel\":"+String(WiFi.channel(i))+
+                    ",\"secure\":"+String(WiFi.encryptionType(i)==WIFI_AUTH_OPEN?"false":"true")+"}";
+        }
+        response+="]}";
+        wifiScanBusy=false;WiFi.scanDelete();
+        server.send(200,"application/json",response);return;
+      }
+      if(wifiScanBusy){wifiScanBusy=false;WiFi.scanDelete();}
+      server.send(200,"application/json","{\"state\":\"idle\",\"networks\":[]}");
     });
     // Straight-line load test. Only authorized Web START runs it; no RFID required.
     server.on("/loadtest/start",HTTP_POST,[this](){
@@ -601,7 +699,12 @@ public:
     server.on("/status", HTTP_GET, [this]() {
       String s = "{";
       s += "\"state\":\"" + String(getStateName(state)) + "\",";
-      s += "\"station\":\"" + String(sensors.getCurrentStationName()) + "\",";
+      // A live color classification is not proof of a confirmed station marker.
+      s += "\"station\":\"" + String(state==STATION_WAIT ? "Confirmed workstation stop" :
+           state==FINISHED ? "Confirmed GREEN finish" : "No confirmed station") + "\",";
+      s += "\"colorCandidate\":\"" + String(sensors.getCurrentStationName()) + "\",";
+      s += "\"colorDistance\":" + (isfinite(sensors.getColorDistance()) ? String(sensors.getColorDistance(),5) : String("null")) + ",";
+      s += "\"lastEvent\":\"" + String(lastNavigationEvent) + "\",";
       s += "\"distCm\":" + String(sensors.getDistanceCm()) + ",";
       s += "\"speed\":" + String(int((motors.maxSpeed / 255.0) * 100)) + ",";
       s += "\"potRaw\":"+String(speedPotRaw)+",";
@@ -772,6 +875,10 @@ public:
         WiFi.softAPConfig(IPAddress(192,168,4,1),IPAddress(192,168,4,1),IPAddress(255,255,255,0));
         startAccessPoint();
       }
+    }
+    // Scheduled reboot applies AP name/password without dropping the response.
+    if(apRestartDueMs && (int32_t)(millis()-apRestartDueMs)>=0){
+      motors.stop(); ESP.restart();
     }
     // Service the latency-critical joystick before the HTTP page/status requests.
     wsServer.loop();
